@@ -1,7 +1,7 @@
 #ifndef __PGENLIB_MISC_H__
 #define __PGENLIB_MISC_H__
 
-// This library is part of PLINK 2.0, copyright (C) 2005-2024 Shaun Purcell,
+// This library is part of PLINK 2.0, copyright (C) 2005-2026 Shaun Purcell,
 // Christopher Chang.
 //
 // This library is free software: you can redistribute it and/or modify it
@@ -74,15 +74,96 @@
 //   on the fly, since that tends to be faster than having to access twice as
 //   much memory.
 
+#include <assert.h>
+#ifndef NDEBUG
+#  include <stdarg.h> // va_start()
+#endif
+#include <stdlib.h>
+#include <string.h>
+
+#include "plink2_base.h"
 #include "plink2_bits.h"
+#include "plink2_simd.h"
 
 // 10000 * major + 100 * minor + patch
 // Exception to CONSTI32, since we want the preprocessor to have access to this
 // value.  Named with all caps as a consequence.
-#define PGENLIB_INTERNAL_VERNUM 2003
+#define PGENLIB_INTERNAL_VERNUM 2100
 
 #ifdef __cplusplus
 namespace plink2 {
+#endif
+
+#ifdef NDEBUG
+HEADER_INLINE BoolErr PglInitLog(__attribute__((unused)) uintptr_t log_capacity) {
+  return 0;
+}
+
+HEADER_INLINE void PglLogprintf(__attribute__((unused)) const char* fmt, ...) {
+}
+
+HEADER_INLINE char* PglReturnLog() {
+  return nullptr;
+}
+
+HEADER_INLINE void PglResetLog() {
+}
+#else
+extern char* g_pgl_errbuf;
+extern char* g_pgl_errbuf_write_iter;
+extern char* g_pgl_errbuf_end;
+
+HEADER_INLINE BoolErr PglInitLog(uintptr_t log_capacity) {
+  if (g_pgl_errbuf) {
+    if (log_capacity <= S_CAST(uintptr_t, g_pgl_errbuf_end - g_pgl_errbuf)) {
+      // existing allocation is fine.  no need to shrink
+      g_pgl_errbuf_write_iter = g_pgl_errbuf;
+      *g_pgl_errbuf_write_iter = '\0';
+      return 0;
+    }
+    free(g_pgl_errbuf);
+  }
+  // 128 extra bytes to make WordWrapMultiline() safe.
+  g_pgl_errbuf = S_CAST(char*, malloc(log_capacity + 128));
+  if (!g_pgl_errbuf) {
+    g_pgl_errbuf_write_iter = nullptr;
+    g_pgl_errbuf_end = nullptr;
+    // in the unlikely event this comes up, caller is free to ignore the error,
+    // logging just won't happen.  though, if malloc is failing, something else
+    // is likely to fail...
+    return 1;
+  }
+  g_pgl_errbuf_write_iter = g_pgl_errbuf;
+  *g_pgl_errbuf_write_iter = '\0';
+  g_pgl_errbuf_end = &(g_pgl_errbuf[log_capacity]);
+  return 0;
+}
+
+HEADER_INLINE void PglLogprintf(const char* fmt, ...) {
+  // possible todo: log levels
+  if (g_pgl_errbuf_write_iter != nullptr) {
+    va_list args;
+    va_start(args, fmt);
+    const uintptr_t remaining_space = g_pgl_errbuf_end - g_pgl_errbuf_write_iter;
+    const uintptr_t intended_slen = vsnprintf(g_pgl_errbuf_write_iter, remaining_space, fmt, args);
+    if (intended_slen < remaining_space) {
+      g_pgl_errbuf_write_iter = &(g_pgl_errbuf_write_iter[intended_slen]);
+    } else {
+      g_pgl_errbuf_write_iter = g_pgl_errbuf_end;
+    }
+  }
+}
+
+HEADER_INLINE char* PglReturnLog() {
+  return g_pgl_errbuf;
+}
+
+HEADER_INLINE void PglResetLog() {
+  if (g_pgl_errbuf) {
+    g_pgl_errbuf_write_iter = g_pgl_errbuf;
+    g_pgl_errbuf_write_iter[0] = '\0';
+  }
+}
 #endif
 
 // other configuration-ish values needed by plink2_common subset
@@ -119,6 +200,12 @@ HEADER_INLINE AlleleCode* DowncastWToAC(uintptr_t* pp) {
 HEADER_INLINE void AlignACToVec(AlleleCode** pp) {
   const uintptr_t addr = R_CAST(uintptr_t, *pp);
   *pp = R_CAST(AlleleCode*, RoundUpPow2(addr, kBytesPerVec));
+}
+
+HEADER_INLINE void swap_ac(AlleleCode* ac0p, AlleleCode* ac1p) {
+  const AlleleCode swaptmp = *ac0p;
+  *ac0p = *ac1p;
+  *ac1p = swaptmp;
 }
 
 // returns a word with low bit in each pair set at each 00.
@@ -363,9 +450,6 @@ HEADER_INLINE void FPutVint64(uint64_t ullii, FILE* ff) {
   putc_unlocked(ullii, ff);
 }
 
-// TODO: make this work properly with kCacheline == 128, then fix other
-// transpose functions, etc.
-
 // main batch size
 CONSTI32(kPglNypTransposeBatch, kNypsPerCacheline);
 
@@ -408,6 +492,11 @@ void BiallelicDosage16Invert(uint32_t dosage_ct, uint16_t* dosage_main);
 
 // replaces each x with -x
 void BiallelicDphase16Invert(uint32_t dphase_ct, int16_t* dphase_delta);
+
+// assumes dosage_ct > 0
+void BiallelicDosage16InvertSubset(const uintptr_t* dosage_present, const uintptr_t* subset, uint32_t dosage_ct, uint16_t* dosage_main_iter);
+
+void BiallelicDphase16InvertSubset(const uintptr_t* dphase_present, const uintptr_t* subset, uint32_t dphase_ct, int16_t* dphase_delta_iter);
 
 void PackWordsToHalfwordsInvmatch(const uintptr_t* __restrict genoarr, uintptr_t inv_match_word, uint32_t inword_ct, uintptr_t* __restrict dst);
 
@@ -572,38 +661,10 @@ HEADER_INLINE uint32_t GenoIter1x(const uintptr_t* __restrict genoarr, uintptr_t
 
 // For every missing entry in genoarr, clear the corresponding subset and
 // sparse_vals entries.
+// 'Unsafe' since they assume 'subset' trailing bits are clear.
 void ClearGenoarrMissing1bit8Unsafe(const uintptr_t* __restrict genoarr, uint32_t* subset_sizep, uintptr_t* __restrict subset, void* __restrict sparse_vals);
 
 void ClearGenoarrMissing1bit16Unsafe(const uintptr_t* __restrict genoarr, uint32_t* subset_sizep, uintptr_t* __restrict subset, void* __restrict sparse_vals);
-
-// See EasyasPi's answer to
-//   https://stackoverflow.com/questions/25095741/how-can-i-multiply-64-bit-operands-and-get-128-bit-result-portably
-HEADER_INLINE uint64_t multiply64to128(uint64_t lhs, uint64_t rhs, uint64_t* high) {
-  // GCC and Clang usually provide __uint128_t on 64-bit targets, although
-  // Clang also defines it on WASM despite having to use builtins for most
-  // purposes -- including multiplication.
-#if defined(__SIZEOF_INT128__) && !defined(__wasm__)
-  __uint128_t product = S_CAST(__uint128_t, lhs) * S_CAST(__uint128_t, rhs);
-  *high = S_CAST(uint64_t, product >> 64);
-  return S_CAST(uint64_t, product & 0xffffffffffffffffLLU);
-#else
-  // Fast yet simple grade school multiply that avoids 64-bit carries with the
-  // properties of multiplying by 11 and takes advantage of UMAAL on ARMv6 to
-  // only need 4 calculations.
-
-  // First calculate all of the cross products.
-  uint64_t lo_lo = (lhs & 0xffffffff) * (rhs & 0xffffffff);
-  uint64_t hi_lo = (lhs >> 32) * (rhs & 0xffffffff);
-  uint64_t lo_hi = (lhs & 0xffffffff) * (rhs >> 32);
-  uint64_t hi_hi = (lhs >> 32) * (rhs >> 32);
-  // Now add the products together.  These will never overflow.
-  uint64_t cross = (lo_lo >> 32) + (hi_lo & 0xffffffff) + lo_hi;
-  uint64_t upper = (hi_lo >> 32) + (cross >> 32) + hi_hi;
-
-  *high = upper;
-  return (cross << 32) | (lo_lo & 0xffffffff);
-#endif
-}
 
 HEADER_INLINE double u127tod(uint64_t hi, uint64_t lo) {
   return u63tod(hi) * 18446744073709551616.0 + S_CAST(double, lo);

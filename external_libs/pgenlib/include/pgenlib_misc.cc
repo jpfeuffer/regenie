@@ -1,4 +1,4 @@
-// This library is part of PLINK 2.0, copyright (C) 2005-2024 Shaun Purcell,
+// This library is part of PLINK 2.0, copyright (C) 2005-2026 Shaun Purcell,
 // Christopher Chang.
 //
 // This library is free software: you can redistribute it and/or modify it
@@ -14,11 +14,18 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with this library.  If not, see <http://www.gnu.org/licenses/>.
 
-
 #include "pgenlib_misc.h"
+
+#include <limits.h>
 
 #ifdef __cplusplus
 namespace plink2 {
+#endif
+
+#ifndef NDEBUG
+char* g_pgl_errbuf = nullptr;
+char* g_pgl_errbuf_write_iter = nullptr;
+char* g_pgl_errbuf_end = nullptr;
 #endif
 
 #ifdef USE_AVX2
@@ -1244,6 +1251,7 @@ void TransposeNypblock64(const uintptr_t* read_iter, uint32_t read_ul_stride, ui
       // and target_4567 to
       //   _ (4, 0) _ (5, 0) _ (6, 0) _ (7, 0) _ (4, 1) _ (5, 1) _ (6, 1) ...
       // This is perfectly arranged for movemask.
+      // todo: better ARM implementation
       VecW target_4567 = vecw_blendv(loader, vecw_srli(loader, 7), m8);
       target_iter7[vidx] = vecw_movemask(target_4567);
       target_4567 = vecw_slli(target_4567, 2);
@@ -1544,6 +1552,50 @@ void BiallelicDosage16Invert(uint32_t dosage_ct, uint16_t* dosage_main) {
 void BiallelicDphase16Invert(uint32_t dphase_ct, int16_t* dphase_delta) {
   for (uint32_t uii = 0; uii != dphase_ct; ++uii) {
     dphase_delta[uii] = -dphase_delta[uii];
+  }
+}
+
+void BiallelicDosage16InvertSubset(const uintptr_t* dosage_present, const uintptr_t* subset, uint32_t dosage_ct, uint16_t* dosage_main_iter) {
+  uint16_t* dosage_main_end = &(dosage_main_iter[dosage_ct]);
+  for (uint32_t widx = 0; ; ++widx) {
+    uintptr_t dosage_present_word = dosage_present[widx];
+    if (!dosage_present_word) {
+      continue;
+    }
+    const uintptr_t subset_word = subset[widx];
+    do {
+      const uintptr_t shifted_bit = dosage_present_word & (-dosage_present_word);
+      if (shifted_bit & subset_word) {
+        *dosage_main_iter = 32768 - (*dosage_main_iter);
+      }
+      ++dosage_main_iter;
+      dosage_present_word ^= shifted_bit;
+    } while (dosage_present_word);
+    if (dosage_main_iter == dosage_main_end) {
+      return;
+    }
+  }
+}
+
+void BiallelicDphase16InvertSubset(const uintptr_t* dphase_present, const uintptr_t* subset, uint32_t dphase_ct, int16_t* dphase_delta_iter) {
+  int16_t* dphase_delta_end = &(dphase_delta_iter[dphase_ct]);
+  for (uint32_t widx = 0; ; ++widx) {
+    uintptr_t dphase_present_word = dphase_present[widx];
+    if (!dphase_present_word) {
+      continue;
+    }
+    const uintptr_t subset_word = subset[widx];
+    do {
+      const uintptr_t shifted_bit = dphase_present_word & (-dphase_present_word);
+      if (shifted_bit & subset_word) {
+        *dphase_delta_iter = -(*dphase_delta_iter);
+      }
+      ++dphase_delta_iter;
+      dphase_present_word ^= shifted_bit;
+    } while (dphase_present_word);
+    if (dphase_delta_iter == dphase_delta_end) {
+      return;
+    }
   }
 }
 
@@ -3517,7 +3569,7 @@ void PglMultiallelicSparseToDenseMiss(const PgenVariant* pgvp, uint32_t sample_c
     uintptr_t sample_idx_base = 0;
     uintptr_t cur_bits = patch_10_set[0];
     const DoubleAlleleCode* patch_10_vals_alias = R_CAST(const DoubleAlleleCode*, pgvp->patch_10_vals);
-    DoubleAlleleCode* wide_codes_alias = R_CAST(DoubleAlleleCode*, wide_codes);
+    DoubleAlleleCode* __attribute__((may_alias)) wide_codes_alias = R_CAST(DoubleAlleleCode*, wide_codes);
     for (uint32_t uii = 0; uii != patch_10_ct; ++uii) {
       const uintptr_t sample_idx = BitIter1(patch_10_set, &sample_idx_base, &cur_bits);
       wide_codes_alias[sample_idx] = patch_10_vals_alias[uii];

@@ -43,6 +43,20 @@
 #include "HLM.hpp"
 #include "Data.hpp"
 
+#ifdef WITH_AWS_S3
+#include "S3_Utils.hpp"
+#endif
+
+#ifdef WITH_AWS_S3
+// Forward-declare the plink2 client-only init/shutdown so we can coordinate
+// SDK initialization: aws_sdk_init() calls Aws::InitAPI once; then we create
+// the pgenlib S3 client without a second InitAPI call.
+namespace plink2 {
+  void S3InitClientOnly();
+  void S3ShutdownClientOnly();
+}
+#endif
+
 #include <boost/exception/all.hpp>
 #include <boost/math/special_functions/gamma.hpp>
 
@@ -58,6 +72,12 @@ MeasureTime::~MeasureTime(){ }
 
 
 int main( int argc, char** argv ) {
+
+#ifdef WITH_AWS_S3
+  aws_sdk_init();
+  // Create the pgenlib S3 client (shares the SDK init done by aws_sdk_init)
+  plink2::S3InitClientOnly();
+#endif
 
   Data data;
   read_params_and_check(argc, argv, &data.params, &data.files, &data.in_filters, &data.runtime, data.sout);
@@ -95,6 +115,11 @@ int main( int argc, char** argv ) {
 
   data.sout << "\nElapsed time : " << std::chrono::duration<double>(data.runtime.end - data.runtime.begin).count() << "s" << endl;
   data.sout << "End time: " << ctime(&data.runtime.end_time_info) << endl; 
+
+#ifdef WITH_AWS_S3
+  plink2::S3ShutdownClientOnly();
+  aws_sdk_shutdown();
+#endif
 
 }
 
@@ -1397,7 +1422,7 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     check_seed(params->rng_seed, vm.count("seed"));
     print_args(arguments, valid_args, sout);
 
-  } catch (const cxxopts::OptionException& e) {
+  } catch (const cxxopts::exceptions::exception& e) {
     if (sout.coss.is_open())
       print_header(sout.coss);
     print_header(cout);

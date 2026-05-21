@@ -25,7 +25,7 @@
 */
 
 #include "NNLS.hpp"
-#include "mvtnorm/mvtnorm.h"
+#include "mvtnorm.h"
 
 using namespace Eigen;
 using namespace std;

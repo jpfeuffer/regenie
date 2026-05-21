@@ -1,5 +1,28 @@
 src/*.o
 external_libs/pgenlib/*.o
 external_libs/pgenlib/include/*.o
+external_libs/pgenlib/pgenlib.a
 docs/nature.csl
+
+# Build directories and artifacts
 build/
+cmake-build-*/
+dist/
+install/
+CMakeFiles/
+CMakeCache.txt
+.cmake/
+cmake_install.cmake
+Makefile
+
+# Compiled libraries and objects
+*.a
+*.so
+*.o
+*.obj
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo

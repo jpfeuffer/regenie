@@ -22,7 +22,7 @@ remeta.a: ${OBJECTS}
 	${AR} rcs $@ $^
 
 %.o: %.cpp
-	${CXX} ${CXXFLAGS} -o $@ -c $< -I${INC}
+	${CXX} ${CXXFLAGS} ${CPPFLAGS} -o $@ -c $< -I${INC}
 
 clean:
 	rm -f *.o *.a

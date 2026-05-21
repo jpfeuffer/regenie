@@ -28,6 +28,10 @@
 #include "Regenie.hpp"
 #include "Files.hpp"
 
+#ifdef WITH_AWS_S3
+#include "S3_Utils.hpp"
+#endif
+
 namespace fs = boost::filesystem;
 
 Files::Files(){
@@ -39,8 +43,15 @@ Files::~Files(){
 void Files::openForRead(std::string const& filename, mstream& sout){
 
   read_mode = true;
-  is_gz = isGzipped(filename, true);
-  //std::cerr << filename << " - gzip = " << std::boolalpha << is_gz << std::endl;
+
+#ifdef WITH_AWS_S3
+  // Resolve S3 URIs to local temp files
+  std::string resolved = resolve_s3_path(filename);
+#else
+  const std::string& resolved = filename;
+#endif
+
+  is_gz = isGzipped(resolved, true);
 
   // only used if compiled with boost iostream
 # if not defined(HAS_BOOST_IOSTREAM)
@@ -50,7 +61,7 @@ void Files::openForRead(std::string const& filename, mstream& sout){
 
   std::ios_base::openmode mode = (is_gz ? std::ios_base::in | std::ios_base::binary : std::ios_base::in ); 
 
-  openStream(&infile, filename, mode, sout);
+  openStream(&infile, resolved, mode, sout);
 
 # if defined(HAS_BOOST_IOSTREAM)
   if(is_gz){
@@ -141,7 +152,7 @@ void Files::closeFile(){
 bool Files::isGzipped(std::string const& filename, bool const& check_file) {
 
   // require all gzipped file to end in .gz
-  if( fs::extension(filename) != ".gz" )
+  if( fs::path(filename).extension().string() != ".gz" )
     return false;
 
   // open file and check first 2 bytes (should equal 0x1f8b)
