@@ -5,7 +5,7 @@ external_libs/pgenlib/pgenlib.a
 docs/nature.csl
 
 # Build directories and artifacts
-build/
+build*/
 cmake-build-*/
 dist/
 install/

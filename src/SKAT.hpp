@@ -88,7 +88,9 @@ extern "C"
 {
 #endif
 
+#ifndef USE_C_QUADPACK
   extern void dqags_(double f(double*),double*,double*,double*,double*,double*,double*,int*,int*,int*,int*,int*,int*,double*);
+#endif
   double SKATO_integral_fn(double*);
   double SKATO_integral_fn_liu(double*);
 

@@ -37,6 +37,11 @@
 #include "SKAT.hpp"
 
 #include "qf/qfc.h"
+#ifdef USE_C_QUADPACK
+extern "C" {
+#include "cquadpak.h"
+}
+#endif
 
 using namespace Eigen;
 using namespace std;
@@ -60,6 +65,13 @@ double skato_upper = 0;
 int skato_state = 0;
 // for LOVO with BTs
 MatrixXd vc_Rvec_start;
+
+#ifdef USE_C_QUADPACK
+static double (*skato_integrand_ptr)(double*) = nullptr;
+static double skato_integrand_c_adapter(double x) {
+  return skato_integrand_ptr(&x);
+}
+#endif
 
 /////////////////////////////////////////////////
 /////////////////////////////////////////////////
@@ -1895,7 +1907,13 @@ void integrate(double f(double*), double& pv, int const& subd, bool const& debug
   VectorXd work = VectorXd::Zero(lenw);
   skato_state = 0;
 
+#ifdef USE_C_QUADPACK
+  skato_integrand_ptr = f;
+  result = dqags(skato_integrand_c_adapter, lower, upper, epsabs, epsrel, &abserr, &neval, &ierror);
+  last = neval;
+#else
   dqags_(f, &lower, &upper, &epsabs, &epsrel, &result, &abserr, &neval, &ierror, &ilimit, &lenw, &last, iwork.data(), work.data());
+#endif
   if(ierror != 0) skato_state = 1;
   if((boost::math::isnan)(result) || !(boost::math::isnormal)(result)) skato_state = 1;
   if(debug) {
