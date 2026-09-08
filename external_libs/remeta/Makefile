@@ -12,8 +12,11 @@ ifneq ($(strip $(HTSLIB_PATH)),) # defined externally
 endif
 
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S),Darwin)
-	CXXFLAGS += -arch x86_64
+ ifeq ($(UNAME_M),x86_64)
+	 CXXFLAGS += -arch x86_64
+ endif
 endif
 
 OBJECTS       = bgz_writer.o regenie_ld_matrix_writer.o

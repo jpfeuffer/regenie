@@ -5,8 +5,11 @@ CC   ?= gcc
 FC   ?= gfortran
 
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S),Darwin)
- FLAG += -arch x86_64
+ ifeq ($(UNAME_M),x86_64)
+  FLAG += -arch x86_64
+ endif
 endif
 
 libMvtnorm.a: mvtnorm.o mvt.o randomF77.o
