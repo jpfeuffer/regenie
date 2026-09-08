@@ -3,8 +3,11 @@ CXX      ?= g++
 CXXFLAGS  = -O2 -DNDEBUG -fPIC
 
 UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S),Darwin)
- CXXFLAGS += -arch x86_64
+ ifeq ($(UNAME_M),x86_64)
+  CXXFLAGS += -arch x86_64
+ endif
 endif
 
 qf.a: qfc.o
