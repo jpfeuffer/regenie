@@ -7,6 +7,7 @@ docs/nature.csl
 # Build directories and artifacts
 build*/
 cmake-build-*/
+benchmark_results/
 dist/
 install/
 CMakeFiles/

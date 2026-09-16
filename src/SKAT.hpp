@@ -100,15 +100,15 @@ extern "C"
 
 // declare global variables
 extern Eigen::ArrayXd flipped_skato_rho;
-extern Eigen::ArrayXd skato_Qmin_rho;
-extern Eigen::ArrayXd skato_tau;
-extern Eigen::VectorXd skato_lambdas;
-extern double skato_muQ;
-extern double skato_fdavies;
-extern double skato_sdQ;
-extern double skato_dfQ;
-extern double skato_upper;
-extern int skato_state; // positive if integration failed
+extern thread_local Eigen::ArrayXd skato_Qmin_rho;
+extern thread_local Eigen::ArrayXd skato_tau;
+extern thread_local Eigen::VectorXd skato_lambdas;
+extern thread_local double skato_muQ;
+extern thread_local double skato_fdavies;
+extern thread_local double skato_sdQ;
+extern thread_local double skato_dfQ;
+extern thread_local double skato_upper;
+extern thread_local int skato_state; // positive if integration failed
 void integrate(double f(double*),double&,int const&,bool const&);
 
 // for lovo with bts

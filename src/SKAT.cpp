@@ -36,11 +36,20 @@
 #include "Step2_Models.hpp"
 #include "SKAT.hpp"
 
-#include "qf/qfc.h"
+#ifdef WITH_THREADSAFE_QF
+#  include "qf/qfc_mt.h"
+#  define QF_FUNC qf_mt
+#else
+#  include "qf/qfc.h"
+#  define QF_FUNC qf
+#endif
 #ifdef USE_C_QUADPACK
 extern "C" {
 #include "cquadpak.h"
 }
+// cquadpak.h defines min/max macros that conflict with std::
+#undef min
+#undef max
 #endif
 
 using namespace Eigen;
@@ -53,21 +62,26 @@ using boost::math::beta_distribution;
 
 // numerical integration using quadpack
 // global variable for SKAT-O if used
+// flipped_skato_rho: set once before the mask loop, read-only inside — plain global.
 ArrayXd flipped_skato_rho = ArrayXd::Zero(1);
-ArrayXd skato_Qmin_rho = ArrayXd::Zero(1);
-ArrayXd skato_tau = ArrayXd::Zero(1);
-VectorXd skato_lambdas = VectorXd::Zero(1);
-double skato_muQ = 0;
-double skato_fdavies = 0;
-double skato_sdQ = 0;
-double skato_dfQ = 0;
-double skato_upper = 0;
-int skato_state = 0;
+// The remaining SKAT-O globals are written inside the mask loop (one value per
+// active mask) and read by the QUADPACK integrand callbacks called on the SAME
+// thread.  Making them thread_local gives each OpenMP worker an independent copy
+// so the mask loop can be parallelized with WITH_THREADSAFE_QF.
+thread_local ArrayXd skato_Qmin_rho = ArrayXd::Zero(1);
+thread_local ArrayXd skato_tau = ArrayXd::Zero(1);
+thread_local VectorXd skato_lambdas = VectorXd::Zero(1);
+thread_local double skato_muQ = 0;
+thread_local double skato_fdavies = 0;
+thread_local double skato_sdQ = 0;
+thread_local double skato_dfQ = 0;
+thread_local double skato_upper = 0;
+thread_local int skato_state = 0;
 // for LOVO with BTs
 MatrixXd vc_Rvec_start;
 
 #ifdef USE_C_QUADPACK
-static double (*skato_integrand_ptr)(double*) = nullptr;
+static thread_local double (*skato_integrand_ptr)(double*) = nullptr;
 static double skato_integrand_c_adapter(double x) {
   return skato_integrand_ptr(&x);
 }
@@ -313,11 +327,9 @@ void compute_vc_masks_qt_fixed_rho(SpMat& mat, const Ref<const ArrayXd>& weights
 
   bool with_acatv = CHECK_BIT(vc_test,0);
   bool with_skat = (vc_test>>1)&15;
-  int jcol, n_pheno = yres.cols(), nnz;
+  int n_pheno = yres.cols();
   double c1 = sqrt(1 - rho);
-  ArrayXd D;
-  VectorXd lambdas;
-  MatrixXd Qs, Qb, Svals, Kmat, sum_stats, pvals;
+  MatrixXd Qs, Qb, Svals, Kmat, pvals;
 
   ArrayXi snp_indices = get_true_indices(Jmat.rowwise().any());
   int bs = snp_indices.size(); // subset to snps included in at least 1 skat mask
@@ -375,21 +387,26 @@ void compute_vc_masks_qt_fixed_rho(SpMat& mat, const Ref<const ArrayXd>& weights
   // SKAT for all masks & traits
   compute_skat_q(Qs, Qb, Svals, Kmat, pvals, weights(snp_indices) != 0, Jmat(snp_indices, all), with_acatv, debug);
 
-  // for now don't parallelize this as it causes issues with qfc lib
-  // but should be ok since dimensions don't depend on N
+  // Mask loop: parallelised with thread-safe qf_mt() when WITH_THREADSAFE_QF is defined
+#ifdef WITH_THREADSAFE_QF
+  if(params.threads > 1) setNbThreads(1);
+#  if defined(_OPENMP)
+#    pragma omp parallel for schedule(dynamic)
+#  endif
+#endif
   for(size_t imask = 0; imask < all_snps_info.size(); imask++){
 
     variant_block* block_info = &(all_snps_info[imask]);
     if(debug) cerr << "Mask : " << block_info->mask_name << "\n";
     if(block_info->sum_stats_vc.size()>0) block_info->sum_stats_vc.clear();
     if(block_info->skip_for_vc) continue;
-    sum_stats = MatrixXd::Constant(n_pheno, 2, -1); // chisq & logp
+    MatrixXd sum_stats = MatrixXd::Constant(n_pheno, 2, -1); // chisq & logp
 
     // get index of mask in Jmat
-    jcol = block_info->col_jmat_skat;
+    int jcol = block_info->col_jmat_skat;
     if(jcol < 0) continue; // this should not happen though
     MapcArXb Jvec (Jmat.col(jcol).data(), Jmat.rows(), 1);
-    nnz = Jvec.count();
+    int nnz = Jvec.count();
     if(debug) cerr << "#sites in mask=" << nnz << "\n";
     if(nnz == 0) continue;
 
@@ -409,6 +426,7 @@ void compute_vc_masks_qt_fixed_rho(SpMat& mat, const Ref<const ArrayXd>& weights
 
     // get eigen values of Rsqrt*V*Rsqrt
     //if(debug) cerr << "Kmat:\n" << Kmat(m_indices, m_indices) << "\nrho_Kmat:\n" << get_RsKRs(Kmat(m_indices, m_indices), rho, c1) << "\n";
+    VectorXd lambdas;
     get_lambdas(lambdas, get_RsKRs(Kmat(m_indices, m_indices), rho, c1), skat_lambda_tol);
     if(lambdas.size() == 0) continue;
     if(debug) cerr << "L:" << lambdas.head(min(150, (int) lambdas.size())).transpose() << "\n";
@@ -423,6 +441,9 @@ void compute_vc_masks_qt_fixed_rho(SpMat& mat, const Ref<const ArrayXd>& weights
     }
 
   }
+#ifdef WITH_THREADSAFE_QF
+  if(params.threads > 1) setNbThreads(params.threads);
+#endif
 
 }
 
@@ -433,17 +454,11 @@ void compute_vc_masks_qt(SpMat& mat, const Ref<const ArrayXd>& weights, const Re
   bool with_skato_int = CHECK_BIT(vc_test,2);
   bool with_skato_acat = CHECK_BIT(vc_test,3);
   bool with_acato = CHECK_BIT(vc_test,4);
-  int jcol, n_pheno = yres.cols(), nnz, nrho = rho_vec.size();
-  double minp, gamma1, gamma2, gamma3, tmpv, log10_nl_dbl_dmin = -log10(nl_dbl_dmin);
-  ArrayXd D, p_acato, flip_rho_sqrt;
-  VectorXd lambdas;
-  MatrixXd Qs, Qb, Qopt, Svals, Kmat, cvals, sum_stats, pvals, r_outer_sum;
-  MatrixXd pvs_skato, chisq_skato, pvs_skato_acat, chisq_skato_acat, pvs_acato, chisq_acato;
-
-  cvals.resize(nrho, 5);
-  skato_Qmin_rho.resize(nrho, 1);
-  if(with_acato) p_acato.resize(nrho+1);
-  flipped_skato_rho = 1 - rho_vec;
+  int n_pheno = yres.cols(), nrho = rho_vec.size();
+  double log10_nl_dbl_dmin = -log10(nl_dbl_dmin);
+  ArrayXd flip_rho_sqrt;
+  MatrixXd Qs, Qb, Svals, Kmat, pvals;
+  flipped_skato_rho = 1 - rho_vec;  // shared read-only within loop
   flip_rho_sqrt = flipped_skato_rho.sqrt();
 
   ArrayXi snp_indices = get_true_indices(Jmat.rowwise().any());
@@ -503,16 +518,28 @@ void compute_vc_masks_qt(SpMat& mat, const Ref<const ArrayXd>& weights, const Re
   // SKAT for all masks & traits
   compute_skat_q(Qs, Qb, Svals, Kmat, pvals, weights(snp_indices) != 0, Jmat(snp_indices, all), with_acatv, debug);
 
-  // for now don't parallelize this as it causes issues with qfc lib
-  // but should be ok since dimensions don't depend on N
+  // Mask loop: parallelised with thread-safe qf_mt() when WITH_THREADSAFE_QF is defined
+#ifdef WITH_THREADSAFE_QF
+  if(params.threads > 1) setNbThreads(1);
+#  if defined(_OPENMP)
+#    pragma omp parallel for schedule(dynamic)
+#  endif
+#endif
   for(size_t imask = 0; imask < all_snps_info.size(); imask++){
 
     variant_block* block_info = &(all_snps_info[imask]);
     if(debug) cerr << "Mask : " << block_info->mask_name << "\n";
     if(block_info->sum_stats_vc.size()>0) block_info->sum_stats_vc.clear();
     if(block_info->skip_for_vc) continue;
-    pvs_skato = MatrixXd::Constant(n_pheno, nrho, -1);
-    chisq_skato = MatrixXd::Constant(n_pheno, nrho, -1);
+    // per-iteration locals (each OpenMP worker thread has its own copy)
+    int jcol, nnz;
+    double gamma1, gamma2, gamma3, tmpv, minp;
+    VectorXd lambdas;
+    MatrixXd Qopt, r_outer_sum, cvals(nrho, 5);
+    MatrixXd pvs_skato = MatrixXd::Constant(n_pheno, nrho, -1);
+    MatrixXd chisq_skato = MatrixXd::Constant(n_pheno, nrho, -1);
+    MatrixXd pvs_skato_acat, chisq_skato_acat, pvs_acato, chisq_acato;
+    ArrayXd p_acato;
     if(with_skato_acat){
       pvs_skato_acat = MatrixXd::Constant(n_pheno, 1, -1);
       chisq_skato_acat = MatrixXd::Constant(n_pheno, 1, -1);
@@ -520,8 +547,10 @@ void compute_vc_masks_qt(SpMat& mat, const Ref<const ArrayXd>& weights, const Re
     if(with_acato){
       pvs_acato = MatrixXd::Constant(n_pheno, 1, -1);
       chisq_acato = MatrixXd::Constant(n_pheno, 1, -1);
+      p_acato.resize(nrho + 1);
     }
-    sum_stats = MatrixXd::Constant(n_pheno, 2, -1); // chisq & logp
+    MatrixXd sum_stats = MatrixXd::Constant(n_pheno, 2, -1); // chisq & logp
+    skato_Qmin_rho.resize(nrho); // ensure thread-local QUADPACK state is correctly sized
 
     // get index of mask in Jmat
     jcol = block_info->col_jmat_skat;
@@ -649,6 +678,9 @@ void compute_vc_masks_qt(SpMat& mat, const Ref<const ArrayXd>& weights, const Re
     }
 
   }
+#ifdef WITH_THREADSAFE_QF
+  if(params.threads > 1) setNbThreads(params.threads);
+#endif
 
 }
 
@@ -1561,7 +1593,7 @@ double get_davies_pv(double const& q, Ref<VectorXd> lambdas, bool const& force_s
   ArrayXd tr = ArrayXd::Constant(7, 0); // params for qf
 
   try {
-    cdf = qf(lambdas.data(), nc.data(), df.data(), k, 0, q, lim, acc1, tr.data(), &ifault); 
+    cdf = QF_FUNC(lambdas.data(), nc.data(), df.data(), k, 0, q, lim, acc1, tr.data(), &ifault); 
     pv = 1 - cdf;
   } catch (...){
     return -1;
@@ -1909,7 +1941,7 @@ void integrate(double f(double*), double& pv, int const& subd, bool const& debug
 
 #ifdef USE_C_QUADPACK
   skato_integrand_ptr = f;
-  result = dqags(skato_integrand_c_adapter, lower, upper, epsabs, epsrel, &abserr, &neval, &ierror);
+  result = dqags((double(*)())skato_integrand_c_adapter, lower, upper, epsabs, epsrel, &abserr, &neval, &ierror);
   last = neval;
 #else
   dqags_(f, &lower, &upper, &epsabs, &epsrel, &result, &abserr, &neval, &ierror, &ilimit, &lenw, &last, iwork.data(), work.data());

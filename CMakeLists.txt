@@ -1,285 +1,394 @@
-cmake_minimum_required(VERSION 3.25)
+# For Intel MKL, set MKLROOT=<MKL_path> when running cmake
+#   e.g. MKLROOT=/opt/mkl/ cmake -S regenie_dir/ -B regenie_dir/build/
+# For OpenBLAS, set OPENBLAS_ROOT=<OpenBLAS_path> when running cmake
+#   note: it also requires lapacke library
+# For static compilation on Linux systems, set STATIC=1 when running cmake
+#   -> this excludes GLIBC
 
-file(STRINGS "${CMAKE_SOURCE_DIR}/VERSION" _version LIMIT_COUNT 1)
-project(regenie VERSION ${_version} LANGUAGES CXX C Fortran)
 
+cmake_minimum_required(VERSION 3.13)
+
+# detect OS architecture
+execute_process(
+  COMMAND uname -s
+  OUTPUT_VARIABLE UNAME_S
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+
+# Get Regenie version
+file(STRINGS "VERSION" RG_VERSION)
+
+project(regenie
+  VERSION ${RG_VERSION}
+  )
+
+include(CMakePackageConfigHelpers)
 include(GNUInstallDirs)
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+# Set output directories for build artifacts
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
-# ─── Options ─────────────────────────────────────────────────────────────────
-option(WITH_AWS_S3         "Build with AWS S3 support"  ON)
-option(WITH_MKL            "Build with Intel MKL"       OFF)
-option(WITH_OPENBLAS       "Build with OpenBLAS"        OFF)
-option(WITH_BOOST_IOSTREAM "Build with Boost IOstreams" OFF)
-option(WITH_HTSLIB         "Build with HTSlib/REMETA"   OFF)
-option(WITH_C_QUADPACK     "Use C implementation of QUADPACK for SKAT-O integration" ON)
-option(BUILD_STATIC        "Link C/C++ runtime statically (GCC only)" OFF)
-set(CQP_SOURCE_DIR "/Users/julianuspfeuffer/Downloads/cqp" CACHE PATH "Path to local CQUADPACK source tree")
+# specify the C++ standard
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)  # Ensures -std=c++11
 
-# ─── Dependencies ───────────────────────────────────────────────────────────
-find_package(bgen REQUIRED)
-find_package(ZLIB REQUIRED)
-find_package(cxxopts REQUIRED)
-find_package(OpenMP)
+# AWS S3 support (ON by default)
+option(WITH_AWS_S3 "Build with AWS S3 support" ON)
 
-include(FetchContent)
+######################################
+######## check input variables
 
-# Eigen 5.x has breaking API changes; pin to 3.4.x
-find_package(Eigen3 3.4 NO_MODULE QUIET)
-if(NOT Eigen3_FOUND OR Eigen3_VERSION VERSION_GREATER_EQUAL "5.0")
-  message(STATUS "Fetching Eigen 3.4.0 (system version ${Eigen3_VERSION} incompatible)")
-  FetchContent_Declare(Eigen3
-    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
-    GIT_TAG        3.4.0
-    GIT_SHALLOW    TRUE)
-  FetchContent_MakeAvailable(Eigen3)
+# check BGEN_PATH — if not set, fetch and build automatically via ExternalProject
+if("$ENV{BGEN_PATH}" STREQUAL "")
+  message(STATUS "BGEN_PATH not set — fetching BGEN library via ExternalProject")
+  include(ExternalProject)
+  set(_BGEN_EP_PREFIX  "${CMAKE_BINARY_DIR}/bgen_external")
+  set(_BGEN_EP_INSTALL "${_BGEN_EP_PREFIX}/install")
+  ExternalProject_Add(bgen_external
+    URL     "http://code.enkre.net/bgen/tarball/release/bgen.tgz"
+    PREFIX  "${_BGEN_EP_PREFIX}"
+    PATCH_COMMAND "${CMAKE_COMMAND}" -E copy
+        "${CMAKE_SOURCE_DIR}/cmake/bgen/CMakeLists.txt"
+        "<SOURCE_DIR>/CMakeLists.txt"
+    CMAKE_ARGS
+      "-DCMAKE_BUILD_TYPE=Release"
+      "-DCMAKE_INSTALL_PREFIX=${_BGEN_EP_INSTALL}"
+      "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+      "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
+    BUILD_BYPRODUCTS
+      "${_BGEN_EP_INSTALL}/lib/libbgen.a"
+      "${_BGEN_EP_INSTALL}/lib/libdb.a"
+      "${_BGEN_EP_INSTALL}/lib/libsqlite3.a"
+      "${_BGEN_EP_INSTALL}/lib/libzstd.a"
+      "${_BGEN_EP_INSTALL}/lib/libboost.a"
+  )
+  ExternalProject_Get_Property(bgen_external SOURCE_DIR)
+  set(BGEN_PATH       "${SOURCE_DIR}" CACHE INTERNAL "BGEN source dir (auto-fetched)")
+  set(ZSTD_LIBRARY    "${_BGEN_EP_INSTALL}/lib/libzstd.a")
+  set(DB_LIBRARY      "${_BGEN_EP_INSTALL}/lib/libdb.a")
+  set(SQLITE3_LIBRARY "${_BGEN_EP_INSTALL}/lib/libsqlite3.a")
+  set(Boost_LIBRARY   "${_BGEN_EP_INSTALL}/lib/libboost.a")
+  set(BGEN_LIBRARY    "${_BGEN_EP_INSTALL}/lib/libbgen.a")
+  set(_BGEN_AUTOFETCH TRUE)
+else()
+  set(BGEN_PATH "$ENV{BGEN_PATH}" CACHE INTERNAL "Set BGEN library path")
+  if (NOT EXISTS ${BGEN_PATH})
+    message( FATAL_ERROR "Specified BGEN library directory '${BGEN_PATH}' does not exist")
+  endif()
 endif()
 
-# LBFGSpp: header-only L-BFGS solver
-find_package(LBFGSpp QUIET)
-if(NOT LBFGSpp_FOUND)
-  message(STATUS "LBFGSpp not found on system, fetching from GitHub")
-  FetchContent_Declare(LBFGSpp
-    GIT_REPOSITORY https://github.com/yixuan/LBFGSpp.git
-    GIT_TAG        v0.3.0
-    GIT_SHALLOW    TRUE)
-  FetchContent_MakeAvailable(LBFGSpp)
-  add_library(LBFGSpp::LBFGSpp ALIAS lbfgspp)
+# check for static compilation
+if($ENV{STATIC})
+  set(BUILD_STATIC ON CACHE INTERNAL "Static compilation")
+  message( STATUS "Static compilation mode")
 endif()
 
+# check Boost IOStreams
+if($ENV{HAS_BOOST_IOSTREAM})
+  set(HAS_BOOST_IOSTREAM 1 CACHE INTERNAL "Add Boost IO")
+  set(RG_VERSION "${RG_VERSION}.gz" CACHE INTERNAL "Update version")
+else()
+  set(HAS_BOOST_IOSTREAM 0 CACHE INTERNAL "Skip Boost IO")
+endif()
+
+# check MKL
+if(NOT "$ENV{MKLROOT}" STREQUAL "")
+  set(MKLROOT "$ENV{MKLROOT}" CACHE INTERNAL "Set MKL library path")
+  if (NOT EXISTS ${MKLROOT})
+    message( FATAL_ERROR "Specified MKL library directory '${MKLROOT}' does not exist")
+  endif()
+  message( STATUS "Will compile with Intel MKL library")
+endif()
+
+# check HTSlib
+if(NOT "$ENV{HTSLIB_PATH}" STREQUAL "")
+  set(HTSLIB_PATH "$ENV{HTSLIB_PATH}" CACHE INTERNAL "Set HTSlib library path")
+  if (NOT EXISTS ${HTSLIB_PATH})
+    message( FATAL_ERROR "Specified HTSlib library directory '${HTSLIB_PATH}' does not exist")
+  endif()
+  message( STATUS "Will compile with HTSlib")
+endif()
+
+# AWS S3 support (resolved early so AWSSDK_INCLUDE_DIRS is available for pgenlib)
 if(WITH_AWS_S3)
   find_package(AWSSDK REQUIRED COMPONENTS s3)
-endif()
-if(WITH_MKL)
-  find_package(MKL REQUIRED)
-elseif(WITH_OPENBLAS)
-  find_package(OpenBLAS REQUIRED)
-endif()
-if(WITH_BOOST_IOSTREAM)
-  find_package(Boost REQUIRED COMPONENTS iostreams)
+  add_definitions(-DWITH_AWS_S3)
+  message(STATUS "Will compile with AWS S3 support")
 endif()
 
-# ─── Regenie executable ─────────────────────────────────────────────────────
+# check OpenBLAS
+if(NOT "$ENV{OPENBLAS_ROOT}" STREQUAL "")
+  set(OPENBLAS_ROOT "$ENV{OPENBLAS_ROOT}" CACHE INTERNAL "Set OpenBLAS library path")
+  if (NOT EXISTS ${OPENBLAS_ROOT})
+    message( FATAL_ERROR "Specified OpenBLAS library directory '${OPENBLAS_ROOT}' does not exist")
+  endif()
+  message( STATUS "Will compile with OpenBLAS library")
+endif()
+
+######################################
+######## set flags and required libraries
+
+set(BLA_STATIC               ${BUILD_STATIC})
+set(Boost_USE_STATIC_LIBS    ${BUILD_STATIC})
+set(Boost_USE_DEBUG_LIBS     OFF)
+set(Boost_USE_MULTITHREADED  ON)
+set(Boost_USE_STATIC_RUNTIME OFF)
+
+# list each file specifically
 add_executable(regenie
-  src/Data.cpp
-  src/Files.cpp
-  src/Geno.cpp
-  src/HLM.cpp
-  src/Interaction.cpp
-  src/Joint_Tests.cpp
-  src/Masks.cpp
-  src/NNLS.cpp
-  src/Pheno.cpp
-  src/Regenie.cpp
-  src/SKAT.cpp
-  src/Step1_Models.cpp
-  src/Step2_Models.cpp
-  src/MultiTrait_Tests.cpp
-  src/MCC.cpp
-  src/Ordinal.cpp
-  src/survival_data.cpp
-  src/cox_ridge.cpp
-  src/cox_score.cpp
-  src/cox_firth.cpp
-  src/S3_Utils.cpp
-)
+  ${CMAKE_SOURCE_DIR}/src/Data.cpp
+  ${CMAKE_SOURCE_DIR}/src/Files.cpp
+  ${CMAKE_SOURCE_DIR}/src/Geno.cpp
+  ${CMAKE_SOURCE_DIR}/src/HLM.cpp
+  ${CMAKE_SOURCE_DIR}/src/Interaction.cpp
+  ${CMAKE_SOURCE_DIR}/src/Joint_Tests.cpp
+  ${CMAKE_SOURCE_DIR}/src/Masks.cpp
+  ${CMAKE_SOURCE_DIR}/src/NNLS.cpp
+  ${CMAKE_SOURCE_DIR}/src/Pheno.cpp
+  ${CMAKE_SOURCE_DIR}/src/Regenie.cpp
+  ${CMAKE_SOURCE_DIR}/src/SKAT.cpp
+  ${CMAKE_SOURCE_DIR}/src/Step1_Models.cpp
+  ${CMAKE_SOURCE_DIR}/src/Step2_Models.cpp
+  ${CMAKE_SOURCE_DIR}/src/MultiTrait_Tests.cpp
+  ${CMAKE_SOURCE_DIR}/src/MCC.cpp
+  ${CMAKE_SOURCE_DIR}/src/Ordinal.cpp
+  ${CMAKE_SOURCE_DIR}/src/survival_data.cpp
+  ${CMAKE_SOURCE_DIR}/src/cox_ridge.cpp
+  ${CMAKE_SOURCE_DIR}/src/cox_score.cpp
+  ${CMAKE_SOURCE_DIR}/src/cox_firth.cpp
+  ${CMAKE_SOURCE_DIR}/src/S3_Utils.cpp
+  )
+target_include_directories(regenie PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-target_include_directories(regenie PRIVATE src)
-target_compile_definitions(regenie PRIVATE VERSION_NUMBER="${PROJECT_VERSION}")
-target_compile_options(regenie PRIVATE
-  -O3 -Wall -pedantic -ffast-math
-  -Wno-unused-local-typedefs -Wno-deprecated-declarations
-  -Wno-long-long -Wno-c11-extensions
-)
+set(CMAKE_CXX_FLAGS "-O3 -Wall -pedantic -ffast-math -Wno-unused-local-typedefs -Wno-deprecated-declarations -Wno-long-long -Wno-c11-extensions -fPIC")
+add_definitions(-DVERSION_NUMBER="${RG_VERSION}")
 
-# -static-libgcc/-static-libstdc++ are GCC-only; macOS/AppleClang links its runtime from the OS
-target_link_options(regenie BEFORE PRIVATE
-  $<$<AND:$<BOOL:${BUILD_STATIC}>,$<CXX_COMPILER_ID:GNU>>:-static-libgcc;-static-libstdc++>
-)
+if("${UNAME_S}" STREQUAL "Linux")
+  find_package(OpenMP REQUIRED)
+  target_link_libraries(regenie PRIVATE OpenMP::OpenMP_CXX)
+  if(${BUILD_STATIC})
+    target_link_options(regenie BEFORE PRIVATE -static-libgcc PRIVATE -static-libstdc++)
+  endif()
+elseif("${UNAME_S}" STREQUAL "Darwin")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
+endif()
 
-# ─── Link dependencies ──────────────────────────────────────────────────────
 set(EXTERN_LIBS_PATH "${CMAKE_SOURCE_DIR}/external_libs")
+target_include_directories(regenie PRIVATE ${EXTERN_LIBS_PATH}/)
 
-target_link_libraries(regenie PRIVATE
-  bgen::bgen
-  ZLIB::ZLIB
-  Eigen3::Eigen
-  cxxopts::cxxopts
-  m
-  ${CMAKE_DL_LIBS}
-  $<$<BOOL:${OpenMP_CXX_FOUND}>:OpenMP::OpenMP_CXX>
-)
-
-# Link Fortran runtime libs from the detected gfortran install, skipping
-# GCC-internal stubs (emutls_w, heapt_w) that don't exist as real libraries.
-foreach(_flib IN LISTS CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES)
-  find_library(_fortran_lib_${_flib} NAMES ${_flib}
-    HINTS ${CMAKE_Fortran_IMPLICIT_LINK_DIRECTORIES}
-    NO_DEFAULT_PATH)
-  if(_fortran_lib_${_flib})
-    target_link_libraries(regenie PRIVATE ${_fortran_lib_${_flib}})
-  endif()
-  unset(_fortran_lib_${_flib} CACHE)
-endforeach()
-
+# BGEN library and its dependencies
+if(NOT _BGEN_AUTOFETCH)
+  # Manual BGEN_PATH: find libs in the waf build output directories
+  find_library(ZSTD_LIBRARY    libzstd.a    HINTS "${BGEN_PATH}/build/3rd_party/zstd-1.1.0"   REQUIRED)
+  find_library(DB_LIBRARY      libdb.a      HINTS "${BGEN_PATH}/build/db"                      REQUIRED)
+  find_library(SQLITE3_LIBRARY libsqlite3.a HINTS "${BGEN_PATH}/build/3rd_party/sqlite3"      REQUIRED)
+  find_library(Boost_LIBRARY   libboost.a   HINTS "${BGEN_PATH}/build/3rd_party/boost_1_55_0" REQUIRED)
+  find_library(BGEN_LIBRARY    libbgen.a    HINTS "${BGEN_PATH}/build"                         REQUIRED)
+endif()
+target_link_libraries(regenie PRIVATE ${ZSTD_LIBRARY} ${BGEN_LIBRARY} ${DB_LIBRARY} ${SQLITE3_LIBRARY} ${Boost_LIBRARY})
+# Detect bundled Boost include dir (release uses boost_1_55_0, trunk boost_1_86_0)
+if(_BGEN_AUTOFETCH)
+  # At configure time the source isn't downloaded yet; add both candidates —
+  # the compiler silently ignores paths that don't exist at build time.
+  set(_BGEN_BOOST_INCS "${BGEN_PATH}/3rd_party/boost_1_55_0" "${BGEN_PATH}/3rd_party/boost_1_86_0")
+else()
+  set(_BGEN_BOOST_INCS "")
+  foreach(_bv boost_1_55_0 boost_1_86_0)
+    if(EXISTS "${BGEN_PATH}/3rd_party/${_bv}")
+      set(_BGEN_BOOST_INCS "${BGEN_PATH}/3rd_party/${_bv}")
+      break()
+    endif()
+  endforeach()
+endif()
 target_include_directories(regenie PRIVATE
-  ${EXTERN_LIBS_PATH}/
-)
-target_link_libraries(regenie PRIVATE LBFGSpp::LBFGSpp)
+  ${BGEN_PATH}
+  ${BGEN_PATH}/genfile/include/
+  ${BGEN_PATH}/3rd_party/zstd-1.1.0/lib
+  ${BGEN_PATH}/db/include/
+  ${BGEN_PATH}/3rd_party/sqlite3
+  ${_BGEN_BOOST_INCS})
 
-# ─── Bundled static libraries ────────────────────────────────────────────────
-set(QF_PATH   "${EXTERN_LIBS_PATH}/qf")
+# MVTNorm library
+set(MVTN_PATH "${EXTERN_LIBS_PATH}/mvtnorm")
+add_custom_target(
+   libMvtnorm
+   COMMAND make
+   WORKING_DIRECTORY ${MVTN_PATH}
+)
+target_link_libraries(regenie PRIVATE ${MVTN_PATH}/libMvtnorm.a)
+add_dependencies(regenie libMvtnorm)
+
+# QF library
+set(QF_PATH "${EXTERN_LIBS_PATH}/qf")
+add_custom_target(
+   libqf
+   COMMAND make
+   WORKING_DIRECTORY ${QF_PATH}
+)
+target_link_libraries(regenie PRIVATE ${QF_PATH}/qf.a)
+add_dependencies(regenie libqf)
+
+# Quadpack library
 set(QUAD_PATH "${EXTERN_LIBS_PATH}/quadpack")
-set(PGEN_PATH "${EXTERN_LIBS_PATH}/pgenlib")
-
-# mvtdst: proper CMake subdirectory — no separate make step needed
-add_subdirectory("${EXTERN_LIBS_PATH}/mvtdst" "${CMAKE_BINARY_DIR}/extern/mvtdst")
-
-add_custom_target(libqf   COMMAND make CXX=${CMAKE_CXX_COMPILER} WORKING_DIRECTORY ${QF_PATH})
-
-set(QUADPACK_LINK_TARGET "${QUAD_PATH}/libquad.a")
-if(WITH_C_QUADPACK)
-  if(EXISTS "${CQP_SOURCE_DIR}/src/cquadpak.h")
-    # Use only the sources that dqags actually calls — avoids pulling in
-    # oscillatory/Fourier routines that use <malloc.h> (Linux-only header).
-    # dqags → G_K21 (our opt) + dqext + dqsort.  That is the full call graph.
-    set(CQP_SOURCES
-      "${CQP_SOURCE_DIR}/src/dqags.c"
-      "${CQP_SOURCE_DIR}/src/dqext.c"
-      "${CQP_SOURCE_DIR}/src/dqsort.c"
-      "${CMAKE_SOURCE_DIR}/src/cqp_opt_dqk21.c"
-    )
-    add_library(cquadpack STATIC ${CQP_SOURCES})
-    target_include_directories(cquadpack PUBLIC "${CQP_SOURCE_DIR}/src")
-    # Apply -O3 -march=native so the compiler can autovectorize the weight loops.
-    target_compile_options(cquadpack PRIVATE -O3 -march=native -ffast-math)
-    set(QUADPACK_LINK_TARGET cquadpack)
-    target_compile_definitions(regenie PRIVATE USE_C_QUADPACK)
-    message(STATUS "Using CQUADPACK (optimized dqk21) from ${CQP_SOURCE_DIR}")
-  else()
-    message(WARNING "WITH_C_QUADPACK=ON but CQP source not found at ${CQP_SOURCE_DIR}; falling back to Fortran QUADPACK")
-    add_custom_target(libquad COMMAND make FC=${CMAKE_Fortran_COMPILER} WORKING_DIRECTORY ${QUAD_PATH})
-  endif()
-else()
-  add_custom_target(libquad COMMAND make FC=${CMAKE_Fortran_COMPILER} WORKING_DIRECTORY ${QUAD_PATH})
-endif()
-
-if(WITH_AWS_S3)
-  add_custom_target(pgenlib
-    COMMAND ${CMAKE_MAKE_PROGRAM} WITH_S3=1 AWS_INCLUDES=-I${AWSSDK_INCLUDE_DIRS} CXX=${CMAKE_CXX_COMPILER}
-    WORKING_DIRECTORY ${PGEN_PATH})
-else()
-  add_custom_target(pgenlib COMMAND make WORKING_DIRECTORY ${PGEN_PATH})
-endif()
-
-add_dependencies(regenie libqf pgenlib)
-if(TARGET libquad)
-  add_dependencies(regenie libquad)
-endif()
-target_link_libraries(regenie PRIVATE
-  mvtnorm
-  ${QF_PATH}/qf.a
-  ${QUADPACK_LINK_TARGET}
-  ${PGEN_PATH}/pgenlib.a
+add_custom_target(
+   libquad
+   COMMAND make
+   WORKING_DIRECTORY ${QUAD_PATH}
 )
+target_link_libraries(regenie PRIVATE ${QUAD_PATH}/libquad.a)
+add_dependencies(regenie libquad)
+
+# PGEN library (with S3 streaming support when WITH_AWS_S3 is ON)
+set(PGEN_PATH "${EXTERN_LIBS_PATH}/pgenlib")
+if(WITH_AWS_S3)
+  # Pass AWS_INCLUDES so plink2_s3.cc can find the SDK headers.
+  add_custom_target(
+     pgenlib
+     COMMAND ${CMAKE_MAKE_PROGRAM}
+             WITH_S3=1
+             AWS_INCLUDES=-I${AWSSDK_INCLUDE_DIRS}
+             CXX=${CMAKE_CXX_COMPILER}
+     WORKING_DIRECTORY ${PGEN_PATH}
+  )
+else()
+  add_custom_target(
+     pgenlib
+     COMMAND make
+     WORKING_DIRECTORY ${PGEN_PATH}
+  )
+endif()
+target_link_libraries(regenie PRIVATE ${PGEN_PATH}/pgenlib.a)
 target_include_directories(regenie PRIVATE ${PGEN_PATH} ${PGEN_PATH}/simde/ ${PGEN_PATH}/include/)
+add_dependencies(regenie pgenlib)
 
-# ─── Optional: HTSlib / REMETA ───────────────────────────────────────────────
-if(WITH_HTSLIB)
-  find_package(PkgConfig REQUIRED)
-  if(DEFINED HTSLIB_PATH)
-    set(ENV{PKG_CONFIG_PATH} "${HTSLIB_PATH}/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
-  endif()
-  pkg_check_modules(htslib REQUIRED IMPORTED_TARGET htslib)
-
+# REMETA library
+if(EXISTS ${HTSLIB_PATH})
   set(REMETA_PATH "${EXTERN_LIBS_PATH}/remeta")
-  add_custom_target(remeta
-    COMMAND ${CMAKE_MAKE_PROGRAM} HTSLIB_PATH=1 "CPPFLAGS=-I${htslib_INCLUDE_DIRS}"
-    WORKING_DIRECTORY ${REMETA_PATH})
+  add_custom_target(
+     remeta
+     COMMAND make HTSLIB_PATH=${HTSLIB_PATH}
+     WORKING_DIRECTORY ${REMETA_PATH}
+  )
+  target_link_libraries(regenie PUBLIC ${REMETA_PATH}/remeta.a)
+  target_include_directories(regenie PUBLIC ${REMETA_PATH})
   add_dependencies(regenie remeta)
 
-  target_compile_definitions(regenie PRIVATE WITH_HTSLIB)
-  target_include_directories(regenie PRIVATE ${REMETA_PATH})
-  target_link_libraries(regenie PRIVATE ${REMETA_PATH}/remeta.a PkgConfig::htslib)
+  add_definitions(-DWITH_HTSLIB)
+  find_library(HTSLIB libhts.a HINTS ${HTSLIB_PATH})
+  find_library(BZ2_LIB bz2 REQUIRED)
+  find_library(LZMA_LIB lzma REQUIRED)
+  find_library(CURL_LIB curl REQUIRED)
+  find_library(CRYPTO_LIB crypto REQUIRED)
+  target_link_libraries(regenie PUBLIC 
+    ${HTSLIB}
+    ${BZ2_LIB} ${LZMA_LIB} ${CURL_LIB} ${CRYPTO_LIB} 
+  )
 endif()
 
-# ─── Optional: BLAS ──────────────────────────────────────────────────────────
-if(WITH_MKL)
-  target_compile_definitions(regenie PRIVATE WITH_MKL EIGEN_USE_BLAS EIGEN_USE_LAPACKE)
-  target_link_libraries(regenie PRIVATE MKL::MKL)
-elseif(WITH_OPENBLAS)
-  target_compile_definitions(regenie PRIVATE WITH_OPENBLAS EIGEN_USE_BLAS EIGEN_USE_LAPACKE)
-  target_link_libraries(regenie PRIVATE OpenBLAS::OpenBLAS)
+# Intel MKL
+if(EXISTS ${MKLROOT})
+  add_definitions(-DWITH_MKL -DEIGEN_USE_BLAS -DEIGEN_USE_LAPACKE)
+  target_include_directories(regenie PRIVATE ${MKLROOT}/include/)
+  if(${BUILD_STATIC}) # specify static libs
+    find_library(MKL_LP64_LIB libmkl_intel_lp64.a 
+      HINTS "${MKLROOT}/lib/intel64"
+      "${MKLROOT}/lib" 
+      REQUIRED)
+    find_library(MKL_THREAD_LIB libmkl_gnu_thread.a 
+      HINTS "${MKLROOT}/lib/intel64"
+      "${MKLROOT}/lib" 
+      REQUIRED)
+    find_library(MKL_CORE_LIB libmkl_core.a 
+      HINTS "${MKLROOT}/lib/intel64"
+      "${MKLROOT}/lib" 
+      REQUIRED)
+    target_link_libraries(regenie PRIVATE "-Wl,--start-group" ${MKL_LP64_LIB} ${MKL_THREAD_LIB} ${MKL_CORE_LIB} "-Wl,--end-group" -lgomp)
+  else() # use dynamic libs
+    find_library(MKL_LP64_LIB mkl_intel_lp64 
+      PATHS "${MKLROOT}/lib/intel64"
+      "${MKLROOT}/lib" 
+      REQUIRED)
+    find_library(MKL_THREAD_LIB mkl_gnu_thread 
+      PATHS "${MKLROOT}/lib/intel64"
+      "${MKLROOT}/lib" 
+      REQUIRED)
+    find_library(MKL_CORE_LIB mkl_core 
+      PATHS "${MKLROOT}/lib/intel64"
+      "${MKLROOT}/lib" 
+      REQUIRED)
+    target_link_libraries(regenie PRIVATE "-Wl,--no-as-needed" ${MKL_LP64_LIB} ${MKL_THREAD_LIB} ${MKL_CORE_LIB} -lgomp)
+  endif()
+elseif(EXISTS ${OPENBLAS_ROOT}) # OpenBLAS
+  add_definitions(-DWITH_OPENBLAS -DEIGEN_USE_BLAS -DEIGEN_USE_LAPACKE)
+  target_include_directories(regenie PRIVATE ${OPENBLAS_ROOT}/include/)
+  find_library(LAPACK_LIB lapack REQUIRED)
+  find_library(BLAS_LIB openblas HINTS "${OPENBLAS_ROOT}/lib/" REQUIRED)
+  target_link_libraries(regenie PRIVATE ${LAPACK_LIB} -llapacke ${BLAS_LIB})
 endif()
 
-# ─── Optional: Boost IOstreams ───────────────────────────────────────────────
-if(WITH_BOOST_IOSTREAM)
-  target_compile_definitions(regenie PRIVATE HAS_BOOST_IOSTREAM)
-  target_link_libraries(regenie PRIVATE Boost::iostreams)
-  message(STATUS "Boost Iostreams enabled")
+# cxxopts (header-only)
+target_include_directories(regenie PRIVATE ${EXTERN_LIBS_PATH}/cxxopts/include/)
+
+# LBFGS (header-only)
+target_include_directories(regenie PRIVATE ${EXTERN_LIBS_PATH}/LBFGSpp/include/)
+
+# Eigen (header-only)
+target_include_directories(regenie PRIVATE ${EXTERN_LIBS_PATH}/eigen-3.4.0/)
+
+# Boost IO
+if(${HAS_BOOST_IOSTREAM})
+  if("${UNAME_S}" STREQUAL "Darwin")
+    find_library(BOOST_LIB_IO libboost_iostreams libboost_iostreams.a REQUIRED)
+    target_link_libraries(regenie PRIVATE ${BOOST_LIB_IO})
+  elseif(${BUILD_STATIC})
+    find_library(BOOST_LIB_IO libboost_iostreams.a REQUIRED)
+    target_link_libraries(regenie PRIVATE ${BOOST_LIB_IO})
+  else()
+    target_link_libraries(regenie PRIVATE -lboost_iostreams)
+  endif()
+  add_definitions(-DHAS_BOOST_IOSTREAM)
+  message( STATUS "Will compile with Boost Iostreams library")
 endif()
 
-# ─── Optional: AWS S3 ────────────────────────────────────────────────────────
+# AWS S3 support (find_package already called above; just link here)
 if(WITH_AWS_S3)
-  target_compile_definitions(regenie PRIVATE WITH_AWS_S3)
   target_link_libraries(regenie PRIVATE ${AWSSDK_LINK_LIBRARIES})
-  message(STATUS "AWS S3 support enabled")
 endif()
 
-# ─── Install ─────────────────────────────────────────────────────────────────
+# Other libraries
+find_library(ZLIB_LIBRARY libz.a z REQUIRED)
+find_library(M_LIB m REQUIRED)
+find_library(DL_LIB dl REQUIRED)
+if("${UNAME_S}" STREQUAL "Linux")
+  set(GFORTRAN_LIBRARY "-lgfortran")
+elseif("${UNAME_S}" STREQUAL "Darwin")
+  find_library(GFORTRAN_LIBRARY gfortran REQUIRED)
+endif()
+target_link_libraries(
+  regenie PRIVATE
+  ${ZLIB_LIBRARY} ${M_LIB} ${DL_LIB} ${PTHREAD_LIB}
+  ${GFORTRAN_LIBRARY}
+)
+
 install(TARGETS regenie RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+message( STATUS "REGENIE v" ${RG_VERSION})
 
-# ─── Benchmark: C vs Fortran QUADPACK ────────────────────────────────────────
-# Requires WITH_C_QUADPACK=ON (cquadpack target) *and* the Fortran fallback.
-# Build both backends into the benchmark so they can be compared head-to-head.
-# Always build libquad.a for the benchmark regardless of WITH_C_QUADPACK.
-if(WITH_C_QUADPACK AND EXISTS "${CQP_SOURCE_DIR}/src/cquadpak.h")
-  if(NOT TARGET libquad)
-    add_custom_target(libquad_bench
-      COMMAND make FC=${CMAKE_Fortran_COMPILER}
-      WORKING_DIRECTORY ${QUAD_PATH})
-  endif()
-
-  add_executable(bench_quadpack
-    test/bench_quadpack.cpp
-    test/bench_qp_adapter.c
-  )
-  target_include_directories(bench_quadpack PRIVATE
-    "${CQP_SOURCE_DIR}/src"
-    src
-  )
-  target_compile_options(bench_quadpack PRIVATE -O3 -march=native -ffast-math)
-  target_link_libraries(bench_quadpack PRIVATE
-    cquadpack
-    ${QUAD_PATH}/libquad.a
-    m
-  )
-  # Pull in gfortran runtime (needed by libquad.a Fortran objects).
-  foreach(_flib IN LISTS CMAKE_Fortran_IMPLICIT_LINK_LIBRARIES)
-    find_library(_fortran_lib_bench_${_flib} NAMES ${_flib}
-      HINTS ${CMAKE_Fortran_IMPLICIT_LINK_DIRECTORIES}
-      NO_DEFAULT_PATH)
-    if(_fortran_lib_bench_${_flib})
-      target_link_libraries(bench_quadpack PRIVATE ${_fortran_lib_bench_${_flib}})
-    endif()
-    unset(_fortran_lib_bench_${_flib} CACHE)
-  endforeach()
-  if(TARGET libquad)
-    add_dependencies(bench_quadpack libquad)
-  elseif(TARGET libquad_bench)
-    add_dependencies(bench_quadpack libquad_bench)
-  endif()
-  # Boost headers (header-only math used in benchmark integrand)
-  find_package(Boost QUIET)
-  if(Boost_FOUND)
-    target_include_directories(bench_quadpack PRIVATE ${Boost_INCLUDE_DIRS})
-  endif()
-  message(STATUS "bench_quadpack target enabled")
+# Ensure regenie waits for the auto-fetched BGEN build
+if(_BGEN_AUTOFETCH)
+  add_dependencies(regenie bgen_external)
 endif()
 
-message(STATUS "REGENIE v${PROJECT_VERSION}")
+add_custom_target(full-clean
+  COMMAND cd "${MVTN_PATH}" && make clean
+  COMMAND cd "${QF_PATH}" && make clean
+  COMMAND cd "${QUAD_PATH}" && make clean
+  COMMAND cd "${PGEN_PATH}" && make clean
+  )
+if(_BGEN_AUTOFETCH)
+  add_custom_command(TARGET full-clean POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E remove_directory "${_BGEN_EP_PREFIX}"
+    COMMENT "Removing auto-fetched BGEN build")
+endif()

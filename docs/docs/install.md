@@ -45,17 +45,19 @@ on your system and modify the MKLROOT variable in the `Makefile`
 to the installed MKL library path.
 
 ### With CMake
-You can compile the binary using CMake version >=3.13 (instead of `make` as above).
+You can compile the binary using CMake version >=3.25 (instead of `make` as above).
 ```
 mkdir -p build
 cd build
-BGEN_PATH=<path_to_bgen_lib> cmake ..
+cmake ..
 make
 ```
-This will generate the binary in the `build/` subdirectory. 
-To use with Boost Iostreams and/or Intel MKL library,
-add the corresponding flags before the `cmake` command on line 3
-(e.g. `BGEN_PATH=<path_to_bgen_lib> HAS_BOOST_IOSTREAM=1 cmake ..`).
+This will generate the binary in the `build/bin/` subdirectory.
+
+Optional CMake flags (`-D<FLAG>=ON`) enable additional backends and
+features such as Intel MKL, OpenBLAS, Boost IOstreams, and HTSlib/REMETA
+support. See [Optional build flags](optional-build-flags.md) for a full
+description of what each flag enables and when to use it.
 
 ### With Docker
 Alternatively, you can use a Docker image to run **regenie**. 
