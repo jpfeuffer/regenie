@@ -77,6 +77,7 @@ include(Dependencies)
 
 # list each file specifically
 add_executable(regenie
+  ${CMAKE_SOURCE_DIR}/src/BgenReader.cpp
   ${CMAKE_SOURCE_DIR}/src/Data.cpp
   ${CMAKE_SOURCE_DIR}/src/Files.cpp
   ${CMAKE_SOURCE_DIR}/src/Geno.cpp

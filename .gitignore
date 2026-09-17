@@ -8,6 +8,7 @@ docs/nature.csl
 build*/
 cmake-build-*/
 benchmark_results/
+benchmark_data*/
 dist/
 install/
 CMakeFiles/
