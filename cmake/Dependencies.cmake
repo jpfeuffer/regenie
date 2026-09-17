@@ -110,7 +110,7 @@ endif()
 # behalf: the .bgi index (a SQLite database) is replaced by bgen-limix's
 # metafile, so there is no SQLite dependency at all.
 
-find_package(bgen 4.2 CONFIG REQUIRED)
+find_package(bgen 4.7.0 CONFIG REQUIRED)
 
 set(REGENIE_HAVE_S3 OFF)
 if(WITH_S3)

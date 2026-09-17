@@ -61,6 +61,9 @@ class BgenParser {
     bool get_layout() const { return layout == 2; }        // v1.2/v1.3
     bool get_compression() const { return compression == 1; } // zlib, else zstd
 
+    // Bits per probability in the genotype blocks.
+    uint32_t get_nbits() const { return nbits; }
+
     int number_of_samples() const { return n_samples; }
     int number_of_variants() const { return n_variants; }
 
@@ -96,7 +99,6 @@ class BgenParser {
       std::vector<std::string> alleles;
     };
 
-    void read_header_flags(std::string const& filename);
     void load_index();
     void build_offset_map();
 
@@ -104,7 +106,7 @@ class BgenParser {
     bgen_metafile* mfile = nullptr;
 
     std::string path;
-    uint32_t layout = 0, compression = 0;
+    uint32_t layout = 0, compression = 0, nbits = 0;
     uint32_t n_samples = 0, n_variants = 0;
     bool have_sample_ids = false;
 

@@ -40,28 +40,6 @@ BgenParser::~BgenParser(){
   if(bfile != nullptr) bgen_file_close(bfile);
 }
 
-// Layout and compression live in the header flags, which bgen-limix does not
-// expose; regenie needs them to decide whether its own decoder can be used.
-void BgenParser::read_header_flags(std::string const& filename){
-
-  std::ifstream in(filename, std::ios::in | std::ios::binary);
-  if(!in) throw "cannot open bgen file : " + filename;
-
-  uint32_t offset = 0, header_length = 0, flags = 0;
-  in.read(reinterpret_cast<char*>(&offset), 4);
-  in.read(reinterpret_cast<char*>(&header_length), 4);
-  if(!in || header_length < 20)
-    throw "invalid bgen header in file : " + filename;
-
-  in.seekg(4 + header_length - 4, std::ios_base::beg);
-  in.read(reinterpret_cast<char*>(&flags), 4);
-  if(!in) throw "invalid bgen header in file : " + filename;
-
-  compression = flags & 0x3;
-  layout = (flags >> 2) & 0xf;
-  have_sample_ids = (flags >> 31) & 0x1;
-}
-
 void BgenParser::load_index(){
 
   std::string const mpath = bgen_metafile_path(path);
@@ -118,11 +96,13 @@ void BgenParser::open(std::string const& filename){
   if(bfile == nullptr) throw "cannot open bgen file : " + filename;
 
   n_samples = bgen_file_nsamples(bfile);
+  layout = bgen_file_layout(bfile);
+  compression = bgen_file_compression(bfile);
+  have_sample_ids = bgen_file_contain_samples(bfile);
 
-  read_header_flags(filename);
   load_index();
 
-  if(bgen_file_contain_samples(bfile)){
+  if(have_sample_ids){
     bgen_samples* s = bgen_file_read_samples(bfile);
     if(s != nullptr){
       sample_ids.resize(n_samples);
@@ -138,6 +118,13 @@ void BgenParser::open(std::string const& filename){
     sample_ids.resize(n_samples);
     for(uint32_t i = 0; i < n_samples; i++)
       sample_ids[i] = "(unknown_sample_" + std::to_string(i + 1) + ")";
+  }
+
+  if(n_variants > 0){
+    bgen_genotype* gt = bgen_file_open_genotype(bfile, variants[0].genotype_offset);
+    if(gt == nullptr) throw "cannot read first genotype block of : " + filename;
+    nbits = bgen_genotype_nbits(gt);
+    bgen_genotype_close(gt);
   }
 
   cursor = 0;
