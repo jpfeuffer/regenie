@@ -27,29 +27,25 @@
 #ifndef S3_UTILS_H
 #define S3_UTILS_H
 
-#ifdef WITH_AWS_S3
-
+#include <memory>
+#include <streambuf>
 #include <string>
 
-// Check if a path is an S3 URI (starts with s3://)
-bool is_s3_path(const std::string& path);
+// Check if a path names a remote object ("s3://", "http://" or "https://").
+// Always available, so builds without S3 can report why the path was rejected.
+bool is_remote_path(std::string const& path);
 
-// Parse an S3 URI into bucket and key components
-void parse_s3_uri(const std::string& uri, std::string& bucket, std::string& key);
+#ifdef WITH_S3
 
-// Download an S3 object to a local temporary file, returns the local path
-std::string download_s3_to_local(const std::string& s3_uri);
+// Initialize libcurl. Call once at program start, before any thread that may
+// open a remote file is spawned.
+void remote_io_init();
 
-// Initialize the AWS SDK (call once at program start)
-void aws_sdk_init();
+// Open a remote object for reading. Data is fetched with HTTP range requests
+// as the buffer is consumed, so no temporary file is staged and opening a
+// multi-gigabyte object costs one small request.
+std::unique_ptr<std::streambuf> open_remote_streambuf(std::string const& path);
 
-// Shutdown the AWS SDK (call once at program end)
-void aws_sdk_shutdown();
-
-// Resolve a path: if it's an S3 URI, download it and return local path;
-// otherwise return the original path unchanged
-std::string resolve_s3_path(const std::string& path);
-
-#endif // WITH_AWS_S3
+#endif // WITH_S3
 
 #endif // S3_UTILS_H

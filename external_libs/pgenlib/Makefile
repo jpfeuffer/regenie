@@ -7,7 +7,7 @@
 #
 AR         ?= ar
 CXX        ?= g++
-CXXFLAGS    = -O3 -Wall -std=c++11 -fPIC
+CXXFLAGS    = -O3 -Wall -std=c++17 -fPIC
 CFLAGS      =
 
 UNAME_S := $(shell uname -s)

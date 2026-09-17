@@ -14,12 +14,11 @@ CMakeFiles/
 CMakeCache.txt
 .cmake/
 cmake_install.cmake
-Makefile
 
 # Compiled libraries and objects
-*.a
+external_libs/**/*.a
+external_libs/**/*.o
 *.so
-*.o
 *.obj
 
 # IDE settings

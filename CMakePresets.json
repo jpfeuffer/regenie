@@ -1,0 +1,64 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "default",
+      "inherits": "base",
+      "displayName": "Release, system dependencies where available",
+      "cacheVariables": {
+        "REGENIE_FETCH_DEPS": "ON"
+      }
+    },
+    {
+      "name": "system-deps",
+      "inherits": "base",
+      "displayName": "Release, no downloads (packagers)",
+      "cacheVariables": {
+        "REGENIE_FETCH_DEPS": "OFF"
+      }
+    },
+    {
+      "name": "mkl",
+      "inherits": "base",
+      "displayName": "Release with Intel MKL as the Eigen BLAS backend",
+      "cacheVariables": {
+        "REGENIE_BLAS_BACKEND": "mkl"
+      }
+    },
+    {
+      "name": "openblas",
+      "inherits": "base",
+      "displayName": "Release with OpenBLAS as the Eigen BLAS backend",
+      "cacheVariables": {
+        "REGENIE_BLAS_BACKEND": "openblas"
+      }
+    },
+    {
+      "name": "dev",
+      "inherits": "base",
+      "displayName": "Debug, assertions on, fast-math off",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "REGENIE_FAST_MATH": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "default", "configurePreset": "default" },
+    { "name": "system-deps", "configurePreset": "system-deps" },
+    { "name": "mkl", "configurePreset": "mkl" },
+    { "name": "openblas", "configurePreset": "openblas" },
+    { "name": "dev", "configurePreset": "dev" }
+  ]
+}

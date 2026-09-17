@@ -42,6 +42,11 @@ class Files {
 
     // for reading
     std::ifstream infile;
+    // for reading s3:// and http(s):// paths without staging a local copy
+    std::unique_ptr<std::streambuf> rbuf;
+    std::unique_ptr<std::istream> rfile;
+    // points at whichever of infile/rfile is active
+    std::istream* inptr = nullptr;
     // for writing
     std::ofstream outfile;
 

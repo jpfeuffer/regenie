@@ -27,10 +27,7 @@
 
 #include "Regenie.hpp"
 #include "Files.hpp"
-
-#ifdef WITH_AWS_S3
 #include "S3_Utils.hpp"
-#endif
 
 namespace fs = boost::filesystem;
 
@@ -39,19 +36,41 @@ Files::Files(){
 Files::~Files(){
 }
 
+// Check the first 2 bytes against the gzip magic number, leaving the stream
+// rewound to where it started.
+static bool has_gzip_magic(std::istream& in){
+
+  uchar header[2];
+  in.read( reinterpret_cast<char *> (&header[0]), 2);
+  bool const is_gzip = (in.gcount() == 2) && (header[0] == 0x1f) && (header[1] == 0x8b);
+
+  in.clear();
+  in.seekg(0);
+
+  return is_gzip;
+}
+
 // Open file (either regular or gzipped)
 void Files::openForRead(std::string const& filename, mstream& sout){
 
   read_mode = true;
 
-#ifdef WITH_AWS_S3
-  // Resolve S3 URIs to local temp files
-  std::string resolved = resolve_s3_path(filename);
+  if(is_remote_path(filename)){
+#ifdef WITH_S3
+    rbuf = open_remote_streambuf(filename);
+    rfile.reset( new std::istream(rbuf.get()) );
+    inptr = rfile.get();
+    // require all gzipped file to end in .gz
+    is_gz = (fs::path(filename).extension().string() == ".gz") && has_gzip_magic(*inptr);
 #else
-  const std::string& resolved = filename;
+    throw "cannot read remote file if compilation is not done with S3 support : " + filename;
 #endif
-
-  is_gz = isGzipped(resolved, true);
+  } else {
+    is_gz = isGzipped(filename, true);
+    std::ios_base::openmode mode = (is_gz ? std::ios_base::in | std::ios_base::binary : std::ios_base::in ); 
+    openStream(&infile, filename, mode, sout);
+    inptr = &infile;
+  }
 
   // only used if compiled with boost iostream
 # if not defined(HAS_BOOST_IOSTREAM)
@@ -59,14 +78,10 @@ void Files::openForRead(std::string const& filename, mstream& sout){
     throw "cannot read gzip file if compilation is not done with the Boost Iostream library (i.e. 'make HAS_BOOST_IOSTREAM=1').";
 #endif
 
-  std::ios_base::openmode mode = (is_gz ? std::ios_base::in | std::ios_base::binary : std::ios_base::in ); 
-
-  openStream(&infile, resolved, mode, sout);
-
 # if defined(HAS_BOOST_IOSTREAM)
   if(is_gz){
     ingzfile.push(boost::iostreams::gzip_decompressor());
-    ingzfile.push(infile);
+    ingzfile.push(*inptr);
   }
 #endif
 
@@ -79,7 +94,7 @@ bool Files::readLine(std::string& line){
     return static_cast<bool>( getline(ingzfile, line) );
 #endif
 
-  return  static_cast<bool>( getline(infile, line) );
+  return  static_cast<bool>( getline(*inptr, line) );
 }
 
 
@@ -96,7 +111,7 @@ void Files::ignoreLines(int const& nlines){
       ingzfile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 #endif
     } else 
-      infile.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+      inptr->ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
   }
 }
@@ -135,7 +150,11 @@ void Files::closeFile(){
     if(is_gz) 
       ingzfile.reset();
 #endif
-    infile.close();
+    if(rfile){
+      rfile.reset();
+      rbuf.reset();
+    } else infile.close();
+    inptr = nullptr;
 
   } else {
 
@@ -180,6 +199,7 @@ void Files::openMode(std::string const& filename, std::ios_base::openmode mode, 
   } else {
     read_mode = true;
     openStream(&infile, filename, mode, sout);
+    inptr = &infile;
   }
 
 }

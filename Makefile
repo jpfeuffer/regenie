@@ -30,7 +30,7 @@ STATIC       := 0
 
 # Use only if not set
 CXX          ?= g++
-CXXFLAGS      = -O3 -Wall -pedantic -ffast-math -std=c++11 -Wno-unused-local-typedefs -Wno-deprecated-declarations -Wno-long-long -Wno-c11-extensions -fPIC
+CXXFLAGS      = -O3 -Wall -pedantic -ffast-math -std=c++17 -Wno-unused-local-typedefs -Wno-deprecated-declarations -Wno-long-long -Wno-c11-extensions -fPIC
 
 EFILE         = regenie
 CFLAGS       ?=
@@ -197,7 +197,7 @@ docker-test:
 ####
 
 
-debug: CXXFLAGS  = -O0 -g -std=c++11 -fPIC
+debug: CXXFLAGS  = -O0 -g -std=c++17 -fPIC
 debug: ${EFILE}
 
 clean:
