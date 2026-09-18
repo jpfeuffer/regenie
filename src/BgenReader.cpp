@@ -135,9 +135,14 @@ void BgenParser::set_force_scan_only(bool force){
   force_scan_only = force;
 }
 
-// Resolution order: an explicit path, then one beside the input, then one in
-// the cache, then build one. Building never writes beside a remote input, and
-// falls back to the cache when the input's directory is read-only.
+// Resolution order for a LOCAL input: one beside it, then one in the cache,
+// then build one. Building never writes beside a read-only directory, in
+// which case it falls back to the cache.
+//
+// Remote inputs are not handled here: unlike a local path, a remote
+// metafile's existence can't be checked cheaply (std::filesystem has no
+// notion of s3://), so "does it exist" and "open it" are the same operation
+// there. load_metafile() tries the remote candidates directly instead.
 std::string BgenParser::resolve_metafile_path(bool& must_create) const {
 
   if(!explicit_metafile_path.empty()){
@@ -146,9 +151,8 @@ std::string BgenParser::resolve_metafile_path(bool& must_create) const {
   }
 
   std::string const beside = bgen_metafile_path(path);
-  bool const remote = is_remote_path(path);
 
-  if(!remote && is_readable(beside)){ must_create = false; return beside; }
+  if(is_readable(beside)){ must_create = false; return beside; }
 
   fs::path const cached =
     metafile_cache_dir() / (cache_key(path, file_size) + ".metafile");
@@ -156,11 +160,9 @@ std::string BgenParser::resolve_metafile_path(bool& must_create) const {
 
   must_create = true;
 
-  if(!remote){
-    fs::path dir = fs::path(beside).parent_path();
-    if(dir.empty()) dir = fs::current_path();
-    if(dir_is_writable(dir)) return beside;
-  }
+  fs::path dir = fs::path(beside).parent_path();
+  if(dir.empty()) dir = fs::current_path();
+  if(dir_is_writable(dir)) return beside;
 
   return cached.string();
 }
@@ -270,79 +272,107 @@ void BgenParser::load_metafile(){
 
   if(force_scan_only && !is_remote_path(path)){ scan_variants(); return; }
 
-  bool must_create = false;
-  std::string const mpath = resolve_metafile_path(must_create);
   bool const explicit_path = !explicit_metafile_path.empty();
 
-  // bgen-limix can only ever create a metafile with fopen(), so a remote
-  // target is rejected here with a clear reason instead of failing inside
-  // bgen_metafile_create() with a bare "could not create file". Reading one
-  // that already exists remotely is fine -- bgen_metafile_open() streams --
-  // so this only fires when the metafile still needs to be built.
-  if(must_create && is_remote_path(mpath))
-    throw "--bgen-metafile " + mpath + " is remote, but building a metafile\n"
-      "       only ever writes through fopen(), so it cannot be created\n"
-      "       there. Point --bgen-metafile at a local path, omit it to use\n"
-      "       the default cache location, or pre-build the metafile "
-      "in-region\n"
-      "       and pass that same remote path so it is read instead.";
+  if(explicit_path){
 
-  if(!must_create) mfile = bgen_metafile_open(mpath.c_str());
+    // A remote candidate can't be existence-checked cheaply, so this is
+    // always an actual open attempt rather than a check-then-open; only a
+    // real failure decides whether it needs to be (and can be) created.
+    if(is_remote_path(explicit_metafile_path)){
+      mfile = bgen_metafile_open(explicit_metafile_path.c_str());
+      if(mfile != nullptr){ read_metafile(explicit_metafile_path); return; }
 
-  if(mfile != nullptr){ read_metafile(mpath); return; }
-
-  // No metafile, or one written by an incompatible version.
-  if(!is_remote_path(path)){
-
-    // An explicit --bgen-metafile is a request to build it there specifically,
-    // so a failure to do so is reported rather than silently worked around.
-    if(explicit_path){
-      mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
-      if(mfile == nullptr)
-        throw "cannot create bgen metafile at " + mpath + " (from --bgen-metafile)";
-      read_metafile(mpath);
-      return;
+      // bgen-limix can only ever create a metafile with fopen(), so this is
+      // reported with a clear reason instead of failing inside
+      // bgen_metafile_create() with a bare "could not create file".
+      throw "--bgen-metafile " + explicit_metafile_path + " is remote and\n"
+        "       does not exist there, but building one only ever writes\n"
+        "       through fopen(), so it cannot be created there either.\n"
+        "       Point --bgen-metafile at a local path, omit it to use the\n"
+        "       default cache location, or pre-build the metafile in-region\n"
+        "       and pass that same remote path so it is read instead.";
     }
 
-    // A metafile is preferred over .bgi whenever both exist, which is why
-    // this is only reached once no metafile was found. bgenix's own default
-    // naming is <bgen>.bgi; an explicit path overrides that.
-    std::string const bgi =
-      !explicit_bgi_path.empty() ? explicit_bgi_path : default_bgi_path(path);
-    if(read_bgi(bgi)) return;
+    bool must_create = !is_readable(explicit_metafile_path);
+    if(!must_create) mfile = bgen_metafile_open(explicit_metafile_path.c_str());
+    if(mfile != nullptr){ read_metafile(explicit_metafile_path); return; }
 
-    // Cheap, local, and pays for itself once a run repeats or an --extract
-    // subset makes random access from the metafile worthwhile: build one
-    // unless the caller asked not to.
-    mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
-    if(mfile != nullptr){ read_metafile(mpath); return; }
-
-    scan_variants();
+    // An explicit --bgen-metafile is a request to build it there
+    // specifically, so a failure to do so is reported rather than silently
+    // worked around.
+    mfile = bgen_metafile_create(bfile, explicit_metafile_path.c_str(), 1, 0);
+    if(mfile == nullptr)
+      throw "cannot create bgen metafile at " + explicit_metafile_path +
+        " (from --bgen-metafile)";
+    read_metafile(explicit_metafile_path);
     return;
   }
 
-  // Enumerating a remote file costs either one request per variant or the
-  // whole object in egress, depending on read-ahead. Neither is something to
-  // spend on the user's behalf.
-  if(!allow_remote_metafile_build)
-    throw "no metafile found for remote file : " + path + "\n"
-      "       Building one requires walking every variant, which costs either\n"
-      "       one request per variant or a full download, and can take hours\n"
-      "       for a large file. Generate\n"
-      "       " + bgen_metafile_path(path) + "\n"
-      "       alongside the data instead -- doing that in the same region as\n"
-      "       the bucket avoids the egress and the round trips entirely.\n"
-      "       Pass --allow-remote-metafile-build to accept the cost and build\n"
-      "       it now; the result is cached and paid for only once.";
+  if(is_remote_path(path)){
 
-  std::cerr << "WARNING: walking every variant of " << path
-            << " to build a metafile; this may take hours for a large file.\n";
+    // A metafile built by an earlier run against this same object, cached
+    // locally: no network cost at all if present.
+    fs::path const cached =
+      metafile_cache_dir() / (cache_key(path, file_size) + ".metafile");
+    if(is_readable(cached.string())){
+      mfile = bgen_metafile_open(cached.string().c_str());
+      if(mfile != nullptr){ read_metafile(cached.string()); return; }
+    }
 
+    // Published alongside the data -- the recommended way to use a remote
+    // BGEN. Existence can't be checked cheaply, so this is a real open
+    // attempt, not a check-then-open.
+    std::string const beside = bgen_metafile_path(path);
+    mfile = bgen_metafile_open(beside.c_str());
+    if(mfile != nullptr){ read_metafile(beside); return; }
+
+    // Neither exists. Enumerating a remote file costs either one request
+    // per variant or the whole object in egress, depending on read-ahead,
+    // so it is not something to spend on the user's behalf.
+    if(!allow_remote_metafile_build)
+      throw "no metafile found for remote file : " + path + "\n"
+        "       Building one requires walking every variant, which costs either\n"
+        "       one request per variant or a full download, and can take hours\n"
+        "       for a large file. Generate\n"
+        "       " + beside + "\n"
+        "       alongside the data instead -- doing that in the same region as\n"
+        "       the bucket avoids the egress and the round trips entirely.\n"
+        "       Pass --allow-remote-metafile-build to accept the cost and build\n"
+        "       it now; the result is cached and paid for only once.";
+
+    std::cerr << "WARNING: walking every variant of " << path
+              << " to build a metafile; this may take hours for a large file.\n";
+
+    mfile = bgen_metafile_create(bfile, cached.string().c_str(), 1, 0);
+    if(mfile == nullptr)
+      throw "cannot create bgen metafile : " + cached.string();
+
+    read_metafile(cached.string());
+    return;
+  }
+
+  // Local input, no explicit path.
+  bool must_create = false;
+  std::string const mpath = resolve_metafile_path(must_create);
+
+  if(!must_create) mfile = bgen_metafile_open(mpath.c_str());
+  if(mfile != nullptr){ read_metafile(mpath); return; }
+
+  // A metafile is preferred over .bgi whenever both exist, which is why
+  // this is only reached once no metafile was found. bgenix's own default
+  // naming is <bgen>.bgi; an explicit path overrides that.
+  std::string const bgi =
+    !explicit_bgi_path.empty() ? explicit_bgi_path : default_bgi_path(path);
+  if(read_bgi(bgi)) return;
+
+  // Cheap, local, and pays for itself once a run repeats or an --extract
+  // subset makes random access from the metafile worthwhile: build one
+  // unless the caller asked not to.
   mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
-  if(mfile == nullptr)
-    throw "cannot create bgen metafile : " + mpath;
+  if(mfile != nullptr){ read_metafile(mpath); return; }
 
-  read_metafile(mpath);
+  scan_variants();
 }
 
 // Walks the file, collecting the same metadata a metafile holds. Genotype
@@ -425,7 +455,11 @@ void BgenParser::open(std::string const& filename){
   }
 
   bfile = bgen_file_open(filename.c_str());
-  if(bfile == nullptr) throw "cannot open bgen file : " + filename;
+  if(bfile == nullptr){
+    std::string detail = s3stream_last_error();
+    throw "cannot open bgen file : " + filename +
+      (detail.empty() ? "" : " (" + detail + ")");
+  }
 
   n_samples = bgen_file_nsamples(bfile);
   layout = bgen_file_layout(bfile);

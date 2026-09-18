@@ -8,9 +8,12 @@ name: S3 integration
 #   - dl.min.io no longer serves standalone binaries
 #   - conda-forge's minio-server has linux-64, osx-64 and win-64 builds
 #
-# There is no minio-mc for win-64, so no client tool is used at all: MinIO treats
-# each top-level directory under its data dir as a bucket, so the fixtures are
-# staged with mkdir/cp before the server starts.
+# Fixtures are uploaded through the S3 API (aws s3 cp) rather than by writing
+# directly into MinIO's data directory: newer MinIO releases require an
+# object's own xl.meta sidecar to consider it real, so a file dropped straight
+# onto disk is invisible to the API (bucket lists as empty, GET 404s) even
+# though it's sitting right there. awscli comes from conda-forge for the same
+# cross-platform reason minio-server does.
 #
 # Server start, test and teardown share a single step on purpose. GitHub reaps
 # the process tree at the end of each step on Windows, so a server backgrounded
@@ -60,6 +63,7 @@ jobs:
             cxx-compiler
             c-compiler
             minio-server
+            awscli
             curl
             libcurl
             zlib
@@ -147,11 +151,7 @@ jobs:
           set -euo pipefail
           export AWS_ENDPOINT_URL="http://127.0.0.1:${MINIO_PORT}"
 
-          # stage fixtures as a bucket: a top-level dir under the data dir
-          mkdir -p "$RUNNER_TEMP/minio-data/$BUCKET"
-          cp example/example_3chr.bgen   "$RUNNER_TEMP/minio-data/$BUCKET/"
-          cp example/example_3chr.sample "$RUNNER_TEMP/minio-data/$BUCKET/"
-
+          mkdir -p "$RUNNER_TEMP/minio-data"
           minio server "$RUNNER_TEMP/minio-data" \
             --address ":${MINIO_PORT}" > "$RUNNER_TEMP/minio.log" 2>&1 &
           MINIO_PID=$!
@@ -163,6 +163,12 @@ jobs:
           done
           curl -sf "$AWS_ENDPOINT_URL/minio/health/live" > /dev/null \
             || { echo "MinIO did not come up"; cat "$RUNNER_TEMP/minio.log"; exit 1; }
+
+          # Upload through the S3 API, not onto disk directly (see the note
+          # at the top of this file for why that stopped being equivalent).
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3 mb "s3://${BUCKET}"
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3 cp \
+            example/example_3chr.bgen "s3://${BUCKET}/example_3chr.bgen"
 
           common=(--step 2 --ignore-pred --bt
                   --phenoFile example/phenotype_bin.txt
@@ -185,12 +191,14 @@ jobs:
             echo "expected failure: remote input without an index was accepted"
             exit 1
           fi
-          grep -q "no index found for remote file" "$RUNNER_TEMP/noindex.log" \
+          grep -q "no metafile found for remote file" "$RUNNER_TEMP/noindex.log" \
             || { echo "wrong error for un-indexed remote input:"; cat "$RUNNER_TEMP/noindex.log"; exit 1; }
           echo "un-indexed remote input is refused, as intended"
 
           # Publish the index alongside the object: the recommended workflow.
-          cp example/example_3chr.bgen.metafile "$RUNNER_TEMP/minio-data/$BUCKET/"
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3 cp \
+            example/example_3chr.bgen.metafile \
+            "s3://${BUCKET}/example_3chr.bgen.metafile"
 
           ./build/bin/regenie "${common[@]}" \
             --bgen "s3://${BUCKET}/example_3chr.bgen" \
