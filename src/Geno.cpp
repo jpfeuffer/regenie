@@ -3124,7 +3124,7 @@ void read_setlist(const struct in_files* files, struct param* params, struct fil
 void check_sets_include_exclude(bool const& bsize_set, const struct in_files* files, struct param* params, struct filter* filters, vector< vector<vset> >& setinfo, mstream& sout){
 
   uint32_t nsets = 0;
-  unsigned long bsize = 0;
+  size_t bsize = 0;
   vector< vector<vset> > tmp_setinfo;
   map<string, vector<int> >::iterator itr;
 

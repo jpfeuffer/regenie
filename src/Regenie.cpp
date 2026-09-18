@@ -24,6 +24,10 @@
 
 */
 
+// cxxopts.hpp uses uint8_t/intmax_t/etc. without including <cstdint> itself,
+// relying on it arriving transitively; GCC 15's libstdc++ stopped doing that
+// for at least one path, so it must come first here.
+#include <cstdint>
 #include "cxxopts.hpp"
 #include <regex>
 #include <chrono>

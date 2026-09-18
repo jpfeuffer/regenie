@@ -26,6 +26,9 @@
 
 #include <limits.h> /* for PATH_MAX */
 #include <chrono>
+#ifdef _WIN32
+#include <stdlib.h> /* for _fullpath */
+#endif
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -1161,7 +1164,9 @@ std::string get_fullpath(std::string fname){
 
   } catch ( std::runtime_error& ex ) {
 
-    // to avoid boost::filesystem error
+#ifndef _WIN32
+    // to avoid boost::filesystem error; the LC_ALL locale bug this works
+    // around is glibc/Boost.Locale-specific and doesn't occur on Windows
     setenv("LC_ALL", "C", 1);
 
     try {
@@ -1171,12 +1176,19 @@ std::string get_fullpath(std::string fname){
       fout = fullpath.make_preferred().string();
 
     } catch ( std::runtime_error& ex ) {
+#endif
 
       try {
 
-        // use realpath
+        // use realpath (POSIX) / _fullpath (Windows, no PATH_MAX equivalent
+        // needed: _MAX_PATH sizes the stack buffer the same way)
+#ifdef _WIN32
+        char buf[_MAX_PATH];
+        char *res = _fullpath(buf, fname.c_str(), _MAX_PATH);
+#else
         char buf[PATH_MAX];
         char *res = realpath(fname.c_str(), buf);
+#endif
         if(res) fout = string(buf);
         else fout = fname; // if failed to get full path
 
@@ -1186,7 +1198,9 @@ std::string get_fullpath(std::string fname){
         fout = fname; // if failed to get full path
       }
 
+#ifndef _WIN32
     }
+#endif
   }
 
   return fout;

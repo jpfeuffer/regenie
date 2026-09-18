@@ -1941,7 +1941,7 @@ void integrate(double f(double*), double& pv, int const& subd, bool const& debug
 
 #ifdef USE_C_QUADPACK
   skato_integrand_ptr = f;
-  result = dqags((double(*)())skato_integrand_c_adapter, lower, upper, epsabs, epsrel, &abserr, &neval, &ierror);
+  result = dqags((double(*)(double))skato_integrand_c_adapter, lower, upper, epsabs, epsrel, &abserr, &neval, &ierror);
   last = neval;
 #else
   dqags_(f, &lower, &upper, &epsabs, &epsrel, &result, &abserr, &neval, &ierror, &ilimit, &lenw, &last, iwork.data(), work.data());
