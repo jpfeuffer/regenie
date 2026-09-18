@@ -106,9 +106,10 @@ endif()
 # BGEN reader and remote input, both from jpfeuffer/bgen-limix.
 #
 # BGEN::bgen resolves its own zlib-ng/zstd dependencies, and BGEN::s3 does
-# curl-based SigV4. Nothing here needs zstd, sqlite3 or Boost on regenie's
-# behalf: the .bgi index (a SQLite database) is replaced by bgen-limix's
-# metafile, so there is no SQLite dependency at all.
+# curl-based SigV4. Variant metadata itself comes from bgen-limix's own
+# metafile format, which needs neither zstd nor SQLite from regenie; SQLite is
+# pulled in separately, only for WITH_BGI, to read (not write) the legacy .bgi
+# format that older pipelines already have lying around.
 
 find_package(bgen 4.7.0 CONFIG REQUIRED)
 
@@ -125,6 +126,13 @@ if(WITH_S3)
       "without remote input. Rebuild bgen-limix with BGEN_ENABLE_S3=ON, or "
       "configure regenie with -DWITH_S3=OFF.")
   endif()
+endif()
+
+set(REGENIE_HAVE_BGI OFF)
+if(WITH_BGI)
+  find_package(SQLite3 REQUIRED)
+  set(REGENIE_HAVE_BGI ON)
+  message(STATUS "regenie: .bgi reading enabled (SQLite3)")
 endif()
 
 ######################################

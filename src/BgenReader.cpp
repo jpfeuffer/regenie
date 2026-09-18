@@ -29,6 +29,11 @@
 #include <sstream>
 
 #include "bgen/bgen.h"
+#include "bgen/s3stream.h"
+
+#ifdef WITH_BGI
+#include <sqlite3.h>
+#endif
 
 #include "BgenReader.hpp"
 #include "S3_Utils.hpp"
@@ -41,6 +46,10 @@ extern "C" {
   struct bgen_variant* bgen_variant_begin(struct bgen_file*, int* error);
   struct bgen_variant* bgen_variant_next(struct bgen_file*, int* error);
   void bgen_variant_destroy(struct bgen_variant const*);
+  // Also internal-only: gives us the stream a .bgi record offset is seeked on,
+  // so a row read from .bgi can be resolved the same way bgen_variant_next
+  // resolves one read sequentially.
+  stream_handle* bgen_file_stream(struct bgen_file const*);
 }
 
 std::string bgen_metafile_path(std::string const& bgen_file){
@@ -57,6 +66,7 @@ bool is_readable(std::string const& p){
 bool allow_remote_metafile_build = false;
 bool force_scan_only = false;
 std::string explicit_metafile_path;
+std::string explicit_bgi_path;
 
 // A stable per-input key, so a cached metafile is reused across runs rather
 // than rebuilt. Size is included so an input replaced in place is not matched.
@@ -98,6 +108,10 @@ bool dir_is_writable(fs::path const& dir){
   return true;
 }
 
+std::string default_bgi_path(std::string const& bgen_file){
+  return bgen_file + ".bgi";
+}
+
 } // anonymous namespace
 
 BgenParser::~BgenParser(){
@@ -111,6 +125,10 @@ void BgenParser::set_allow_remote_metafile_build(bool allow){
 
 void BgenParser::set_metafile_path(std::string const& path){
   explicit_metafile_path = path;
+}
+
+void BgenParser::set_bgi_path(std::string const& path){
+  explicit_bgi_path = path;
 }
 
 void BgenParser::set_force_scan_only(bool force){
@@ -147,6 +165,107 @@ std::string BgenParser::resolve_metafile_path(bool& must_create) const {
   return cached.string();
 }
 
+// Reads variant metadata via a bgenix .bgi (SQLite) file: one row per variant,
+// giving the byte offset where its identifying data starts. That offset is
+// exactly what bgen_variant_begin() seeks to before parsing the first variant,
+// so each row is resolved by seeking there and reusing the same parser that
+// drives scan_variants() -- alleles, rsid, chromosome and the genotype offset
+// all come from the bgen file itself, not from .bgi, so stale text fields in
+// .bgi cannot desync regenie's view of them. A stale *offset* is a different
+// risk: it would have bgen_variant_next() parse whatever bytes happen to sit
+// there, so the file size recorded in .bgi's own Metadata table is checked
+// against the real one first, the same guard bgenix itself uses.
+bool BgenParser::read_bgi(std::string const& bgi_path){
+
+#ifndef WITH_BGI
+  (void)bgi_path;
+  return false;
+#else
+  if(!is_readable(bgi_path)) return false;
+
+  sqlite3* db = nullptr;
+  if(sqlite3_open_v2(bgi_path.c_str(), &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK){
+    if(db) sqlite3_close(db);
+    return false;
+  }
+
+  {
+    sqlite3_stmt* meta = nullptr;
+    bool size_ok = false;
+    if(sqlite3_prepare_v2(db, "SELECT file_size FROM Metadata LIMIT 1", -1, &meta, nullptr) == SQLITE_OK){
+      if(sqlite3_step(meta) == SQLITE_ROW)
+        size_ok = (file_size <= 0) || (sqlite3_column_int64(meta, 0) == file_size);
+    }
+    sqlite3_finalize(meta);
+    if(!size_ok){
+      std::cerr << "WARNING: ignoring " << bgi_path
+                << " -- its recorded file size does not match " << path
+                << " (looks stale)\n";
+      sqlite3_close(db);
+      return false;
+    }
+  }
+
+  sqlite3_stmt* stmt = nullptr;
+  int rc = sqlite3_prepare_v2(db,
+      "SELECT file_start_position FROM Variant ORDER BY file_start_position",
+      -1, &stmt, nullptr);
+  if(rc != SQLITE_OK){
+    sqlite3_close(db);
+    return false;
+  }
+
+  variants.clear();
+
+  stream_handle* handle = bgen_file_stream(bfile);
+  int err = 0;
+
+  while((rc = sqlite3_step(stmt)) == SQLITE_ROW){
+
+    int64_t const offset = sqlite3_column_int64(stmt, 0);
+    if(stream_handle_seek(handle, offset, SEEK_SET) != 0){
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      throw "cannot seek to variant at offset " + std::to_string(offset)
+        + " in " + path + " (from " + bgi_path + ")";
+    }
+
+    bgen_variant* v = bgen_variant_next(bfile, &err);
+    if(v == nullptr || err){
+      sqlite3_finalize(stmt);
+      sqlite3_close(db);
+      throw "cannot read variant at offset " + std::to_string(offset)
+        + " in " + path + " (from " + bgi_path + ")";
+    }
+
+    variants.emplace_back();
+    variant_meta& m = variants.back();
+
+    m.genotype_offset = v->genotype_offset;
+    m.position = v->position;
+    m.chromosome.assign(v->chrom->data, v->chrom->length);
+    m.rsid.assign(v->rsid->data, v->rsid->length);
+
+    m.alleles.resize(v->nalleles);
+    for(uint16_t ia = 0; ia < v->nalleles; ia++)
+      m.alleles[ia].assign(v->allele_ids[ia]->data, v->allele_ids[ia]->length);
+
+    bgen_variant_destroy(v);
+  }
+
+  sqlite3_finalize(stmt);
+  sqlite3_close(db);
+
+  if(rc != SQLITE_DONE){
+    variants.clear();
+    throw "error reading " + bgi_path;
+  }
+
+  n_variants = static_cast<uint32_t>(variants.size());
+  return true;
+#endif
+}
+
 void BgenParser::load_metafile(){
 
   if(force_scan_only && !is_remote_path(path)){ scan_variants(); return; }
@@ -160,6 +279,13 @@ void BgenParser::load_metafile(){
 
   // No metafile, or one written by an incompatible version.
   if(!is_remote_path(path)){
+
+    // A metafile is preferred over .bgi whenever both exist, which is why
+    // this is only reached once no metafile was found. bgenix's own default
+    // naming is <bgen>.bgi; an explicit path overrides that.
+    std::string const bgi =
+      !explicit_bgi_path.empty() ? explicit_bgi_path : default_bgi_path(path);
+    if(read_bgi(bgi)) return;
 
     // Cheap, local, and pays for itself once a run repeats or an --extract
     // subset makes random access from the metafile worthwhile: build one

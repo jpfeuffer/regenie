@@ -71,7 +71,10 @@ class BgenParser {
     // Uses (or creates) the metafile at this path instead of the default
     // beside-input/cache resolution. Must be called before open().
     static void set_metafile_path(std::string const& path);
-
+    // Reads variant metadata from this bgenix .bgi file, in place of a
+    // metafile, if present. Only consulted when no metafile is found; the
+    // metafile is preferred whenever both exist. Must be called before open().
+    static void set_bgi_path(std::string const& path);
     // Skips the metafile entirely and always scans; for a one-off run over a
     // local file where persisting a metafile isn't worth the write.
     static void set_force_scan_only(bool force);
@@ -123,6 +126,11 @@ class BgenParser {
     void scan_variants();
     void read_metafile(std::string const& mpath);
     void build_offset_map();
+
+    // Reads variant metadata from a bgenix .bgi (SQLite) file instead of a
+    // metafile. Returns false, without touching `variants`, if bgi_path is
+    // not readable or WITH_BGI was not compiled in.
+    bool read_bgi(std::string const& bgi_path);
 
     // Where to read or build the metafile. Never returns a path beside a
     // remote input, and falls back to a cache directory when the input's

@@ -165,6 +165,7 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     ("bgen", "BGEN file", cxxopts::value<std::string>(files->bgen_file),"FILE")
     ("sample", "sample file corresponding to BGEN file", cxxopts::value<std::string>(files->sample_file),"FILE")
     ("bgen-metafile", "path to the BGEN metafile to use (or create if absent), overriding the default beside-input/cache location", cxxopts::value<std::string>(),"FILE")
+    ("bgen-bgi", "path to a bgenix .bgi index to read variant metadata from, overriding the default <bgen>.bgi (ignored if a metafile is found first)", cxxopts::value<std::string>(),"FILE")
     ("no-bgen-metafile", "scan the BGEN file for each run instead of using or creating a metafile (for a one-off run where persisting one is not worth it)")
     ("allow-remote-metafile-build", "build a missing BGEN metafile from a remote file (costs a request per variant or a full download)")
     ("ref-first", "use the first allele as the reference for BGEN or PLINK bed/bim/fam input format [default assumes reference is last]")
@@ -437,6 +438,7 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     if( vm.count("allow-remote-metafile-build") ) params->allow_remote_metafile_build = true;
     if( vm.count("no-bgen-metafile") ) params->no_bgen_metafile = true;
     if( vm.count("bgen-metafile") ) params->bgen_metafile_arg = vm["bgen-metafile"].as<std::string>();
+    if( vm.count("bgen-bgi") ) params->bgen_bgi_arg = vm["bgen-bgi"].as<std::string>();
     if( vm.count("ref-first") ) params->ref_first = true;
     if( vm.count("bt") ) params->trait_mode = 1;
     if( vm.count("ct") ) params->trait_mode = 2;
@@ -1311,6 +1313,8 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
       BgenParser::set_force_scan_only(params->no_bgen_metafile);
       if(!params->bgen_metafile_arg.empty())
         BgenParser::set_metafile_path(params->bgen_metafile_arg);
+      if(!params->bgen_bgi_arg.empty())
+        BgenParser::set_bgi_path(params->bgen_bgi_arg);
     }
     if(vm.count("covarFile")) check_file(files->cov_file,"covarFile");
     if(!params->getCorMat) check_file(files->pheno_file,"phenoFile"); 

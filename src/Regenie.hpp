@@ -193,6 +193,7 @@ struct param {
   bool allow_remote_metafile_build = false; // build a bgen metafile from a remote file
   bool no_bgen_metafile = false; // scan the bgen file instead of using/creating a metafile
   std::string bgen_metafile_arg; // explicit metafile path, overriding the default resolution
+  std::string bgen_bgi_arg; // explicit .bgi path, overriding the default <bgen>.bgi
   bool gzOut = false; // to compress output files (.loco and .regenie files)
   bool transposedPheno = false, tpheno_iid_only = false;
   bool condition_snps = false, condition_file = false;

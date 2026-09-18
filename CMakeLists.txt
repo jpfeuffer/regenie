@@ -44,6 +44,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)  # Ensures -std=c++17
 # Remote input (s3:// and http(s)://) through BGEN::s3; curl-based SigV4.
 option(WITH_S3 "Enable reading s3:// and http(s):// inputs" ON)
 
+# Reads bgenix-generated .bgi index files, for compatibility with pipelines
+# that already have one. bgen-limix's own metafile is preferred whenever both
+# exist, and is what regenie itself creates; this only reads .bgi, never
+# writes it. Off means such an input falls back to the metafile/scan path.
+option(WITH_BGI "Read legacy .bgi index files via system SQLite3" ON)
+
 # The pure-C cquadpack integrator produces bit-identical SKAT-O p-values to the
 # Fortran quadpack it replaces, and removes the gfortran build/link dependency.
 # Set OFF to fall back to Fortran quadpack.
@@ -115,6 +121,7 @@ target_compile_definitions(regenie PRIVATE
   VERSION_NUMBER="${RG_VERSION}"
   $<$<BOOL:${HAS_BOOST_IOSTREAM}>:HAS_BOOST_IOSTREAM>
   $<$<BOOL:${REGENIE_HAVE_S3}>:WITH_S3>
+  $<$<BOOL:${REGENIE_HAVE_BGI}>:WITH_BGI>
   $<$<BOOL:${REGENIE_HAVE_HTSLIB}>:WITH_HTSLIB>
   $<$<BOOL:${WITH_THREADSAFE_QF}>:WITH_THREADSAFE_QF>
   $<$<BOOL:${USE_C_QUADPACK}>:USE_C_QUADPACK>)
@@ -156,6 +163,10 @@ target_link_libraries(regenie PRIVATE BGEN::bgen)
 
 if(REGENIE_HAVE_S3)
   target_link_libraries(regenie PRIVATE BGEN::s3)
+endif()
+
+if(REGENIE_HAVE_BGI)
+  target_link_libraries(regenie PRIVATE SQLite::SQLite3)
 endif()
 
 
