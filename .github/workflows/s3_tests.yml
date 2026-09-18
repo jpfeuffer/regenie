@@ -40,7 +40,7 @@ jobs:
         shell: bash -el {0}
 
     env:
-      BGEN_TAG: v4.9.0
+      BGEN_TAG: v4.9.1
       MINIO_PORT: 19000
       BUCKET: regenie-test
 
