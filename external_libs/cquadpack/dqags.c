@@ -28,7 +28,7 @@
  *
  *	epsrel - relative accuracy requested.
  */ 	
-double dqags(double f(),double a,double b,double epsabs,
+double dqags(double f(double),double a,double b,double epsabs,
 	double epsrel,double *abserr,int *neval,int *ier)
 {
 	double abseps,alist[LIMIT],area,area1,area12,area2;

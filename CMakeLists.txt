@@ -28,6 +28,14 @@ project(regenie
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(GNUInstallDirs)
 
+# MSVC's <cmath>/<math.h> only define M_PI/M_SQRT1_2/etc. (BSD/POSIX
+# extensions, not standard C/C++) when this is defined before their first
+# inclusion. A directory-scope definition applies before any translation
+# unit in this build is even opened, unlike an in-file #define, which would
+# depend on include order in each of the several files that use them. A
+# no-op on every other compiler/platform.
+add_compile_definitions(_USE_MATH_DEFINES)
+
 # Set output directories for build artifacts
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)

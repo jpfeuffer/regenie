@@ -9,7 +9,7 @@
 #include <math.h>
 #include "cquadpak.h"
 
-double G_K21(double f(), double a, double b, double *abserr,
+double G_K21(double f(double), double a, double b, double *abserr,
              double *resabs, double *resasc)
 {
   /* abscissae and weights of the 21-point kronrod rule; xgk(2),xgk(4),...
