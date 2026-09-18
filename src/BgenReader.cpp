@@ -35,6 +35,14 @@
 
 namespace fs = boost::filesystem;
 
+// Sequential variant iteration. Implemented in bgen-limix's src/variant.c and
+// exported, but not yet declared in its installed headers.
+extern "C" {
+  struct bgen_variant* bgen_variant_begin(struct bgen_file*, int* error);
+  struct bgen_variant* bgen_variant_next(struct bgen_file*, int* error);
+  void bgen_variant_destroy(struct bgen_variant const*);
+}
+
 std::string bgen_metafile_path(std::string const& bgen_file){
   return bgen_file + ".metafile";
 }
@@ -131,24 +139,70 @@ void BgenParser::load_index(){
 
   if(!must_create) mfile = bgen_metafile_open(mpath.c_str());
 
-  if(mfile == nullptr){ // absent, or written by an incompatible version
-    if(is_remote_path(path) && !allow_remote_index_build)
-      throw "no index found for remote file : " + path + "\n"
-        "       Building one walks every variant. The scan seeks past genotype\n"
-        "       blocks, but the reader fetches in 8MB chunks that tile the file,\n"
-        "       so those bytes are transferred anyway and the walk costs roughly\n"
-        "       one full download. Either generate\n"
-        "       " + bgen_metafile_path(path) + " alongside the data, or pass\n"
-        "       --allow-remote-index-build to build it now.";
+  if(mfile != nullptr){ read_metafile(mpath); return; }
 
-    if(is_remote_path(path))
-      std::cerr << "WARNING: building an index for " << path
-                << " transfers roughly the whole object; this may take a while.\n";
+  // No index, or one written by an incompatible version.
+  if(!is_remote_path(path)){ scan_variants(); return; }
 
-    mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
-    if(mfile == nullptr)
-      throw "cannot create bgen index file : " + mpath;
+  // Enumerating a remote file costs either one request per variant or the
+  // whole object in egress, depending on read-ahead. Neither is something to
+  // spend on the user's behalf.
+  if(!allow_remote_index_build)
+    throw "no index found for remote file : " + path + "\n"
+      "       Reading one requires walking every variant, which costs either\n"
+      "       one request per variant or a full download, and can take hours\n"
+      "       for a large file. Generate\n"
+      "       " + bgen_metafile_path(path) + "\n"
+      "       alongside the data instead -- doing that in the same region as\n"
+      "       the bucket avoids the egress and the round trips entirely.\n"
+      "       Pass --allow-remote-index-build to accept the cost and build it\n"
+      "       now; the result is cached and paid for only once.";
+
+  std::cerr << "WARNING: walking every variant of " << path
+            << " to build an index; this may take hours for a large file.\n";
+
+  mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
+  if(mfile == nullptr)
+    throw "cannot create bgen index file : " + mpath;
+
+  read_metafile(mpath);
+}
+
+// Walks the file, collecting the same metadata a metafile holds. Genotype
+// blocks are seeked over, not read.
+void BgenParser::scan_variants(){
+
+  variants.clear();
+  variants.reserve(bgen_file_nvariants(bfile));
+
+  int err = 0;
+  for(bgen_variant* v = bgen_variant_begin(bfile, &err); v != nullptr;
+      v = bgen_variant_next(bfile, &err)){
+
+    variants.emplace_back();
+    variant_meta& m = variants.back();
+
+    m.genotype_offset = v->genotype_offset;
+    m.position = v->position;
+    m.chromosome.assign(v->chrom->data, v->chrom->length);
+    m.rsid.assign(v->rsid->data, v->rsid->length);
+
+    m.alleles.resize(v->nalleles);
+    for(uint16_t ia = 0; ia < v->nalleles; ia++)
+      m.alleles[ia].assign(v->allele_ids[ia]->data, v->allele_ids[ia]->length);
+
+    bgen_variant_destroy(v);
+
+    if(err) throw "error reading variant " + std::to_string(variants.size())
+      + " of " + path;
   }
+
+  if(err) throw "error walking variants of " + path;
+
+  n_variants = static_cast<uint32_t>(variants.size());
+}
+
+void BgenParser::read_metafile(std::string const& mpath){
 
   n_variants = bgen_metafile_nvariants(mfile);
   variants.resize(n_variants);

@@ -39,9 +39,11 @@ struct bgen_metafile;
 
 // Reader for BGEN files, backed by the bgen-limix C API.
 //
-// Variant metadata and addresses come from bgen-limix's metafile index, which
-// is created next to the BGEN file on first use. The older .bgi index is a
-// SQLite database and is no longer read.
+// Variant metadata and addresses come either from bgen-limix's metafile index,
+// when one exists, or from a sequential walk of the file. The index is only
+// ever written on request: locally the walk is cheap enough not to justify it,
+// and remotely it is refused outright unless the user opts in. The older .bgi
+// index is a SQLite database and is no longer read.
 //
 // Positions handed out by get_position() and accepted by jumpto() are
 // genotype-block offsets (bgen_variant::genotype_offset), i.e. they point past
@@ -58,8 +60,8 @@ class BgenParser {
 
     void open(std::string const& filename);
 
-    // Building an index for a remote input reads the entire object, so it is
-    // refused unless the user opts in.
+    // Enumerating a remote input costs either a request per variant or a full
+    // download, so it is refused unless the user opts in.
     static void set_allow_remote_index_build(bool allow);
 
     std::string summarise() const;
@@ -106,6 +108,8 @@ class BgenParser {
     };
 
     void load_index();
+    void scan_variants();
+    void read_metafile(std::string const& mpath);
     void build_offset_map();
 
     // Where to read or build the index. Never returns a path beside a remote
