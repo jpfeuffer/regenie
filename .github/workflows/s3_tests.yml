@@ -139,12 +139,28 @@ jobs:
                   --covarFile example/covariates.txt
                   --bsize 100)
 
-          # the metafile index is written next to the input, so a remote BGEN
-          # needs a writable local cache; run local first to produce a reference
+          # Reference run on local input; this also builds the index, which is
+          # then published alongside the object so the remote run finds it.
           ./build/bin/regenie "${common[@]}" \
             --bgen example/example_3chr.bgen \
             --sample example/example_3chr.sample \
             --out "$RUNNER_TEMP/local"
+
+          # A remote BGEN with no index must fail rather than silently pulling
+          # the whole object over the network.
+          if ./build/bin/regenie "${common[@]}" \
+               --bgen "s3://${BUCKET}/example_3chr.bgen" \
+               --sample example/example_3chr.sample \
+               --out "$RUNNER_TEMP/noindex" > "$RUNNER_TEMP/noindex.log" 2>&1; then
+            echo "expected failure: remote input without an index was accepted"
+            exit 1
+          fi
+          grep -q "no index found for remote file" "$RUNNER_TEMP/noindex.log" \
+            || { echo "wrong error for un-indexed remote input:"; cat "$RUNNER_TEMP/noindex.log"; exit 1; }
+          echo "un-indexed remote input is refused, as intended"
+
+          # Publish the index alongside the object: the recommended workflow.
+          cp example/example_3chr.bgen.metafile "$RUNNER_TEMP/minio-data/$BUCKET/"
 
           ./build/bin/regenie "${common[@]}" \
             --bgen "s3://${BUCKET}/example_3chr.bgen" \

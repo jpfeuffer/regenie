@@ -46,6 +46,8 @@ bool is_readable(std::string const& p){
   return probe.good();
 }
 
+bool allow_remote_index_build = false;
+
 // A stable per-input key, so a cached index is reused across runs rather than
 // rebuilt. Size is included so an input replaced in place is not matched.
 std::string cache_key(std::string const& path, int64_t size){
@@ -93,6 +95,10 @@ BgenParser::~BgenParser(){
   if(bfile != nullptr) bgen_file_close(bfile);
 }
 
+void BgenParser::set_allow_remote_index_build(bool allow){
+  allow_remote_index_build = allow;
+}
+
 // Resolution order: an index that already exists beside the input, then one in
 // the cache, then build one. Building never writes beside a remote input, and
 // falls back to the cache when the input's directory is read-only.
@@ -126,11 +132,17 @@ void BgenParser::load_index(){
   if(!must_create) mfile = bgen_metafile_open(mpath.c_str());
 
   if(mfile == nullptr){ // absent, or written by an incompatible version
+    if(is_remote_path(path) && !allow_remote_index_build)
+      throw "no index found for remote file : " + path + "\n"
+        "       Building one reads the entire object over the network, which for a\n"
+        "       large BGEN means transferring all of it. Either generate\n"
+        "       " + bgen_metafile_path(path) + " alongside the data, or pass\n"
+        "       --allow-remote-index-build to build it now.";
+
     if(is_remote_path(path))
-      std::cerr << "WARNING: no index found for " << path
-                << "; building one requires reading the whole file over the "
-                   "network. Generate " << bgen_metafile_path(path)
-                << " alongside the data to avoid this.\n";
+      std::cerr << "WARNING: building an index for " << path
+                << " reads the whole file over the network.\n";
+
     mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
     if(mfile == nullptr)
       throw "cannot create bgen index file : " + mpath;

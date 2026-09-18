@@ -58,6 +58,10 @@ class BgenParser {
 
     void open(std::string const& filename);
 
+    // Building an index for a remote input reads the entire object, so it is
+    // refused unless the user opts in.
+    static void set_allow_remote_index_build(bool allow);
+
     std::string summarise() const;
 
     bool get_layout() const { return layout == 2; }        // v1.2/v1.3

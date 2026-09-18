@@ -164,6 +164,7 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     ("pgen", "prefix to PLINK2 .pgen/.pvar/.psam files", cxxopts::value<std::string>(files->pgen_prefix),"PREFIX")
     ("bgen", "BGEN file", cxxopts::value<std::string>(files->bgen_file),"FILE")
     ("sample", "sample file corresponding to BGEN file", cxxopts::value<std::string>(files->sample_file),"FILE")
+    ("allow-remote-index-build", "build a missing BGEN index from a remote file (reads the whole object)")
     ("ref-first", "use the first allele as the reference for BGEN or PLINK bed/bim/fam input format [default assumes reference is last]")
     ("keep", "comma-separated list of files listing samples to retain in the analysis (no header; starts with FID IID)", cxxopts::value<std::string>(),"FILE")
     ("remove", "comma-separated list of files listing samples to remove from the analysis (no header; starts with FID IID)", cxxopts::value<std::string>(),"FILE")
@@ -431,6 +432,7 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     if( vm.count("bed") ) params->file_type = "bed";
     if( vm.count("pgen") ) params->file_type = "pgen";
     if( vm.count("sample") ) params->bgenSample = true;
+    if( vm.count("allow-remote-index-build") ) params->allow_remote_index_build = true;
     if( vm.count("ref-first") ) params->ref_first = true;
     if( vm.count("bt") ) params->trait_mode = 1;
     if( vm.count("ct") ) params->trait_mode = 2;
@@ -1301,6 +1303,7 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     if(params->file_type == "bgen") {
       check_file (files->bgen_file, "bgen"); 
       if(params->bgenSample) check_file (files->sample_file, "sample"); 
+      BgenParser::set_allow_remote_index_build(params->allow_remote_index_build);
     }
     if(vm.count("covarFile")) check_file(files->cov_file,"covarFile");
     if(!params->getCorMat) check_file(files->pheno_file,"phenoFile"); 
