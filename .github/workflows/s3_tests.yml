@@ -1,0 +1,161 @@
+name: S3 integration
+
+# Exercises the s3:// input path end to end against a local MinIO server, on all
+# three platforms.
+#
+# MinIO comes from conda-forge rather than a container or a download:
+#   - GitHub's macOS and Windows runners cannot run Linux containers
+#   - dl.min.io no longer serves standalone binaries
+#   - conda-forge's minio-server has linux-64, osx-64 and win-64 builds
+#
+# There is no minio-mc for win-64, so no client tool is used at all: MinIO treats
+# each top-level directory under its data dir as a bucket, so the fixtures are
+# staged with mkdir/cp before the server starts.
+#
+# Server start, test and teardown share a single step on purpose. GitHub reaps
+# the process tree at the end of each step on Windows, so a server backgrounded
+# in one step is gone by the next.
+
+on:
+  push:
+    branches: [master, modernize-build]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  s3:
+    name: "S3 (${{ matrix.os }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    defaults:
+      run:
+        shell: bash -el {0}
+
+    env:
+      BGEN_TAG: v4.7.5
+      MINIO_PORT: 19000
+      BUCKET: regenie-test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          micromamba-version: latest
+          init-shell: bash
+          environment-name: regenie-s3
+          create-args: >-
+            -c conda-forge
+            cmake
+            ninja
+            cxx-compiler
+            c-compiler
+            minio-server
+            curl
+            libcurl
+            zlib
+            zstd
+            zlib-ng
+            boost-cpp
+            eigen
+            cxxopts
+            libdeflate
+
+      # bgen-limix >= 4.7 is needed for bgen_file_layout/compression/nbits and
+      # BGEN::s3. conda-forge's bgen is still on the older 4.1.x line.
+      - name: Build and install bgen-limix
+        run: |
+          git clone --depth 1 --branch "$BGEN_TAG" \
+            https://github.com/jpfeuffer/bgen-limix.git "$RUNNER_TEMP/bgen"
+          cmake -S "$RUNNER_TEMP/bgen" -B "$RUNNER_TEMP/bgen/build" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$CONDA_PREFIX" \
+            -DBGEN_BUILD_TESTS=OFF \
+            -DBGEN_ENABLE_S3=ON
+          cmake --build "$RUNNER_TEMP/bgen/build"
+          cmake --install "$RUNNER_TEMP/bgen/build"
+
+      - name: Configure and build regenie
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$CONDA_PREFIX" \
+            -DWITH_S3=ON
+          cmake --build build
+
+      - name: Confirm S3 support is compiled in
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ls build/bin/
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            otool -L build/bin/regenie | grep -i curl
+          else
+            ldd build/bin/regenie | grep -i curl
+          fi
+
+      # Everything below runs in ONE step so the server survives on Windows.
+      - name: Run regenie against MinIO
+        env:
+          AWS_ACCESS_KEY_ID: minioadmin
+          AWS_SECRET_ACCESS_KEY: minioadmin
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          MINIO_ROOT_USER: minioadmin
+          MINIO_ROOT_PASSWORD: minioadmin
+          # lets MinIO accept virtual-hosted-style requests as well as path-style
+          MINIO_DOMAIN: localhost
+        run: |
+          set -euo pipefail
+          export AWS_ENDPOINT_URL="http://127.0.0.1:${MINIO_PORT}"
+
+          # stage fixtures as a bucket: a top-level dir under the data dir
+          mkdir -p "$RUNNER_TEMP/minio-data/$BUCKET"
+          cp example/example_3chr.bgen   "$RUNNER_TEMP/minio-data/$BUCKET/"
+          cp example/example_3chr.sample "$RUNNER_TEMP/minio-data/$BUCKET/"
+
+          minio server "$RUNNER_TEMP/minio-data" \
+            --address ":${MINIO_PORT}" > "$RUNNER_TEMP/minio.log" 2>&1 &
+          MINIO_PID=$!
+          trap 'kill "$MINIO_PID" 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 60); do
+            if curl -sf "$AWS_ENDPOINT_URL/minio/health/live" > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -sf "$AWS_ENDPOINT_URL/minio/health/live" > /dev/null \
+            || { echo "MinIO did not come up"; cat "$RUNNER_TEMP/minio.log"; exit 1; }
+
+          common=(--step 2 --ignore-pred --bt
+                  --phenoFile example/phenotype_bin.txt
+                  --covarFile example/covariates.txt
+                  --bsize 100)
+
+          # the metafile index is written next to the input, so a remote BGEN
+          # needs a writable local cache; run local first to produce a reference
+          ./build/bin/regenie "${common[@]}" \
+            --bgen example/example_3chr.bgen \
+            --sample example/example_3chr.sample \
+            --out "$RUNNER_TEMP/local"
+
+          ./build/bin/regenie "${common[@]}" \
+            --bgen "s3://${BUCKET}/example_3chr.bgen" \
+            --sample example/example_3chr.sample \
+            --out "$RUNNER_TEMP/remote"
+
+          grep -v '^##' "$RUNNER_TEMP/local_Y1.regenie"  > "$RUNNER_TEMP/a.txt"
+          grep -v '^##' "$RUNNER_TEMP/remote_Y1.regenie" > "$RUNNER_TEMP/b.txt"
+          diff "$RUNNER_TEMP/a.txt" "$RUNNER_TEMP/b.txt"
+          echo "s3:// results match local input"
+
+      - name: MinIO log on failure
+        if: failure()
+        run: cat "$RUNNER_TEMP/minio.log" || true
