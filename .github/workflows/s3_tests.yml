@@ -40,7 +40,7 @@ jobs:
         shell: bash -el {0}
 
     env:
-      BGEN_TAG: v4.9.1
+      BGEN_TAG: v4.10.1
       MINIO_PORT: 19000
       BUCKET: regenie-test
 
@@ -76,17 +76,27 @@ jobs:
       # drops its athr (progress-bar) dependency entirely, which used to need
       # -DBGEN_USE_SYSTEM_ATHR=OFF here since athr was never in create-args
       # above and conda-forge's copy also hardcoded an Xcode SDK path.
-      #
-      # On Windows, CMake's plain cc/c++ search finds the runner image's
-      # preinstalled C:\mingw64 ahead of the conda env's MSVC (from the
-      # c-compiler/cxx-compiler packages above), since both provide a
-      # generically-named compiler. Pinning CMAKE_C/CXX_COMPILER=cl picks
-      # the one that actually matches this dependency chain unambiguously.
+      - name: Show compiler environment (Windows diagnostics)
+        if: runner.os == 'Windows'
+        run: |
+          echo "CC=$CC"
+          echo "CXX=$CXX"
+          which cl 2>/dev/null || echo "cl not on PATH"
+          which cc 2>/dev/null || echo "cc not on PATH"
+          echo "PATH=$PATH"
+
+      # CMake's plain cc/c++ search finds the runner image's preinstalled
+      # C:\mingw64 ahead of the conda env's MSVC (from the c-compiler/
+      # cxx-compiler packages above), since both provide a generically-named
+      # compiler. Pinning to $CC/$CXX -- set by conda's own vs2019_win-64/
+      # vs2022_win-64 activation scripts to cl.exe's full path -- picks the
+      # one that actually matches this dependency chain; a bare "cl" would
+      # discard that path and fail the same PATH search a second time.
       - name: Build and install bgen-limix
         run: |
           extra_args=()
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            extra_args+=(-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl)
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "$CC" ]; then
+            extra_args+=(-DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX")
           fi
           git clone --depth 1 --branch "$BGEN_TAG" \
             https://github.com/jpfeuffer/bgen-limix.git "$RUNNER_TEMP/bgen"
@@ -102,8 +112,8 @@ jobs:
       - name: Configure and build regenie
         run: |
           extra_args=()
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            extra_args+=(-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl)
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "$CC" ]; then
+            extra_args+=(-DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX")
           fi
           cmake -S . -B build -G Ninja \
             "${extra_args[@]}" \
