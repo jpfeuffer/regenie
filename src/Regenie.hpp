@@ -190,7 +190,9 @@ struct param {
   int trait_mode = 0; // 0=QT,1=BT,2=CT,3=T2E
   bool strict_mode = false; // remove individuals with any NA
   bool bgenSample = false; // .sample file for bgen file
-  bool allow_remote_index_build = false; // build a bgen index from a remote file
+  bool allow_remote_metafile_build = false; // build a bgen metafile from a remote file
+  bool no_bgen_metafile = false; // scan the bgen file instead of using/creating a metafile
+  std::string bgen_metafile_arg; // explicit metafile path, overriding the default resolution
   bool gzOut = false; // to compress output files (.loco and .regenie files)
   bool transposedPheno = false, tpheno_iid_only = false;
   bool condition_snps = false, condition_file = false;

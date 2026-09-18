@@ -164,7 +164,9 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     ("pgen", "prefix to PLINK2 .pgen/.pvar/.psam files", cxxopts::value<std::string>(files->pgen_prefix),"PREFIX")
     ("bgen", "BGEN file", cxxopts::value<std::string>(files->bgen_file),"FILE")
     ("sample", "sample file corresponding to BGEN file", cxxopts::value<std::string>(files->sample_file),"FILE")
-    ("allow-remote-index-build", "build a missing BGEN index from a remote file (reads the whole object)")
+    ("bgen-metafile", "path to the BGEN metafile to use (or create if absent), overriding the default beside-input/cache location", cxxopts::value<std::string>(),"FILE")
+    ("no-bgen-metafile", "scan the BGEN file for each run instead of using or creating a metafile (for a one-off run where persisting one is not worth it)")
+    ("allow-remote-metafile-build", "build a missing BGEN metafile from a remote file (costs a request per variant or a full download)")
     ("ref-first", "use the first allele as the reference for BGEN or PLINK bed/bim/fam input format [default assumes reference is last]")
     ("keep", "comma-separated list of files listing samples to retain in the analysis (no header; starts with FID IID)", cxxopts::value<std::string>(),"FILE")
     ("remove", "comma-separated list of files listing samples to remove from the analysis (no header; starts with FID IID)", cxxopts::value<std::string>(),"FILE")
@@ -432,7 +434,9 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     if( vm.count("bed") ) params->file_type = "bed";
     if( vm.count("pgen") ) params->file_type = "pgen";
     if( vm.count("sample") ) params->bgenSample = true;
-    if( vm.count("allow-remote-index-build") ) params->allow_remote_index_build = true;
+    if( vm.count("allow-remote-metafile-build") ) params->allow_remote_metafile_build = true;
+    if( vm.count("no-bgen-metafile") ) params->no_bgen_metafile = true;
+    if( vm.count("bgen-metafile") ) params->bgen_metafile_arg = vm["bgen-metafile"].as<std::string>();
     if( vm.count("ref-first") ) params->ref_first = true;
     if( vm.count("bt") ) params->trait_mode = 1;
     if( vm.count("ct") ) params->trait_mode = 2;
@@ -1303,7 +1307,10 @@ void read_params_and_check(int& argc, char *argv[], struct param* params, struct
     if(params->file_type == "bgen") {
       check_file (files->bgen_file, "bgen"); 
       if(params->bgenSample) check_file (files->sample_file, "sample"); 
-      BgenParser::set_allow_remote_index_build(params->allow_remote_index_build);
+      BgenParser::set_allow_remote_metafile_build(params->allow_remote_metafile_build);
+      BgenParser::set_force_scan_only(params->no_bgen_metafile);
+      if(!params->bgen_metafile_arg.empty())
+        BgenParser::set_metafile_path(params->bgen_metafile_arg);
     }
     if(vm.count("covarFile")) check_file(files->cov_file,"covarFile");
     if(!params->getCorMat) check_file(files->pheno_file,"phenoFile"); 

@@ -54,10 +54,12 @@ bool is_readable(std::string const& p){
   return probe.good();
 }
 
-bool allow_remote_index_build = false;
+bool allow_remote_metafile_build = false;
+bool force_scan_only = false;
+std::string explicit_metafile_path;
 
-// A stable per-input key, so a cached index is reused across runs rather than
-// rebuilt. Size is included so an input replaced in place is not matched.
+// A stable per-input key, so a cached metafile is reused across runs rather
+// than rebuilt. Size is included so an input replaced in place is not matched.
 std::string cache_key(std::string const& path, int64_t size){
   std::hash<std::string> h;
   std::ostringstream o;
@@ -65,8 +67,8 @@ std::string cache_key(std::string const& path, int64_t size){
   return o.str();
 }
 
-// Directory to build an index in when it cannot live beside the input.
-fs::path index_cache_dir(){
+// Directory to build a metafile in when it cannot live beside the input.
+fs::path metafile_cache_dir(){
 
   char const* env[] = {"REGENIE_CACHE_DIR", "XDG_CACHE_HOME", "TMPDIR"};
   for(size_t i = 0; i < 3; i++){
@@ -103,14 +105,27 @@ BgenParser::~BgenParser(){
   if(bfile != nullptr) bgen_file_close(bfile);
 }
 
-void BgenParser::set_allow_remote_index_build(bool allow){
-  allow_remote_index_build = allow;
+void BgenParser::set_allow_remote_metafile_build(bool allow){
+  allow_remote_metafile_build = allow;
 }
 
-// Resolution order: an index that already exists beside the input, then one in
+void BgenParser::set_metafile_path(std::string const& path){
+  explicit_metafile_path = path;
+}
+
+void BgenParser::set_force_scan_only(bool force){
+  force_scan_only = force;
+}
+
+// Resolution order: an explicit path, then one beside the input, then one in
 // the cache, then build one. Building never writes beside a remote input, and
 // falls back to the cache when the input's directory is read-only.
-std::string BgenParser::resolve_index_path(bool& must_create) const {
+std::string BgenParser::resolve_metafile_path(bool& must_create) const {
+
+  if(!explicit_metafile_path.empty()){
+    must_create = !is_readable(explicit_metafile_path);
+    return explicit_metafile_path;
+  }
 
   std::string const beside = bgen_metafile_path(path);
   bool const remote = is_remote_path(path);
@@ -118,7 +133,7 @@ std::string BgenParser::resolve_index_path(bool& must_create) const {
   if(!remote && is_readable(beside)){ must_create = false; return beside; }
 
   fs::path const cached =
-    index_cache_dir() / (cache_key(path, file_size) + ".metafile");
+    metafile_cache_dir() / (cache_key(path, file_size) + ".metafile");
   if(is_readable(cached.string())){ must_create = false; return cached.string(); }
 
   must_create = true;
@@ -132,38 +147,50 @@ std::string BgenParser::resolve_index_path(bool& must_create) const {
   return cached.string();
 }
 
-void BgenParser::load_index(){
+void BgenParser::load_metafile(){
+
+  if(force_scan_only && !is_remote_path(path)){ scan_variants(); return; }
 
   bool must_create = false;
-  std::string const mpath = resolve_index_path(must_create);
+  std::string const mpath = resolve_metafile_path(must_create);
 
   if(!must_create) mfile = bgen_metafile_open(mpath.c_str());
 
   if(mfile != nullptr){ read_metafile(mpath); return; }
 
-  // No index, or one written by an incompatible version.
-  if(!is_remote_path(path)){ scan_variants(); return; }
+  // No metafile, or one written by an incompatible version.
+  if(!is_remote_path(path)){
+
+    // Cheap, local, and pays for itself once a run repeats or an --extract
+    // subset makes random access from the metafile worthwhile: build one
+    // unless the caller asked not to.
+    mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
+    if(mfile != nullptr){ read_metafile(mpath); return; }
+
+    scan_variants();
+    return;
+  }
 
   // Enumerating a remote file costs either one request per variant or the
   // whole object in egress, depending on read-ahead. Neither is something to
   // spend on the user's behalf.
-  if(!allow_remote_index_build)
-    throw "no index found for remote file : " + path + "\n"
-      "       Reading one requires walking every variant, which costs either\n"
+  if(!allow_remote_metafile_build)
+    throw "no metafile found for remote file : " + path + "\n"
+      "       Building one requires walking every variant, which costs either\n"
       "       one request per variant or a full download, and can take hours\n"
       "       for a large file. Generate\n"
       "       " + bgen_metafile_path(path) + "\n"
       "       alongside the data instead -- doing that in the same region as\n"
       "       the bucket avoids the egress and the round trips entirely.\n"
-      "       Pass --allow-remote-index-build to accept the cost and build it\n"
-      "       now; the result is cached and paid for only once.";
+      "       Pass --allow-remote-metafile-build to accept the cost and build\n"
+      "       it now; the result is cached and paid for only once.";
 
   std::cerr << "WARNING: walking every variant of " << path
-            << " to build an index; this may take hours for a large file.\n";
+            << " to build a metafile; this may take hours for a large file.\n";
 
   mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
   if(mfile == nullptr)
-    throw "cannot create bgen index file : " + mpath;
+    throw "cannot create bgen metafile : " + mpath;
 
   read_metafile(mpath);
 }
@@ -255,7 +282,7 @@ void BgenParser::open(std::string const& filename){
   compression = bgen_file_compression(bfile);
   have_sample_ids = bgen_file_contain_samples(bfile);
 
-  load_index();
+  load_metafile();
 
   if(have_sample_ids){
     bgen_samples* s = bgen_file_read_samples(bfile);

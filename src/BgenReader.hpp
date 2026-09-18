@@ -39,11 +39,15 @@ struct bgen_metafile;
 
 // Reader for BGEN files, backed by the bgen-limix C API.
 //
-// Variant metadata and addresses come either from bgen-limix's metafile index,
-// when one exists, or from a sequential walk of the file. The index is only
-// ever written on request: locally the walk is cheap enough not to justify it,
-// and remotely it is refused outright unless the user opts in. The older .bgi
-// index is a SQLite database and is no longer read.
+// Variant metadata and addresses come either from bgen-limix's own metafile
+// format, when one exists or can be built, or from a sequential walk of the
+// file otherwise. Locally a metafile is built and cached by default, since it
+// pays for itself once a run repeats or an --extract/--exclude subset makes
+// its random access worthwhile; --no-bgen-metafile forces the scan-only path
+// for a genuine one-off run. Remotely, enumerating is refused outright unless
+// the user opts in, since it costs a request per variant or a full download.
+// The older .bgi index is a distinct format (a SQLite database) and is no
+// longer read; do not confuse the two.
 //
 // Positions handed out by get_position() and accepted by jumpto() are
 // genotype-block offsets (bgen_variant::genotype_offset), i.e. they point past
@@ -62,7 +66,15 @@ class BgenParser {
 
     // Enumerating a remote input costs either a request per variant or a full
     // download, so it is refused unless the user opts in.
-    static void set_allow_remote_index_build(bool allow);
+    static void set_allow_remote_metafile_build(bool allow);
+
+    // Uses (or creates) the metafile at this path instead of the default
+    // beside-input/cache resolution. Must be called before open().
+    static void set_metafile_path(std::string const& path);
+
+    // Skips the metafile entirely and always scans; for a one-off run over a
+    // local file where persisting a metafile isn't worth the write.
+    static void set_force_scan_only(bool force);
 
     std::string summarise() const;
 
@@ -107,15 +119,15 @@ class BgenParser {
       std::vector<std::string> alleles;
     };
 
-    void load_index();
+    void load_metafile();
     void scan_variants();
     void read_metafile(std::string const& mpath);
     void build_offset_map();
 
-    // Where to read or build the index. Never returns a path beside a remote
-    // input, and falls back to a cache directory when the input's directory is
-    // not writable.
-    std::string resolve_index_path(bool& must_create) const;
+    // Where to read or build the metafile. Never returns a path beside a
+    // remote input, and falls back to a cache directory when the input's
+    // directory is not writable.
+    std::string resolve_metafile_path(bool& must_create) const;
 
     bgen_file* bfile = nullptr;
     bgen_metafile* mfile = nullptr;
