@@ -32,7 +32,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wsign-compare"
 #endif
-#include "bgen_to_vcf.hpp"
+#include "BgenReader.hpp"
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
@@ -152,8 +152,6 @@ void check_bgen(const std::string&,std::string const&,bool&,bool&,uint&,int cons
 void prep_bgen(struct in_files*,struct param*,struct filter*,std::vector<snp>&,std::map<int,std::vector<int>>&,BgenParser&,mstream&);
 void read_bgen_sample(const std::string&,struct param*,std::vector<std::string> &,mstream&);
 void read_bgen_sample(const std::string&,std::vector<std::string> &,mstream&);
-void read_bgi_file(BgenParser&,struct in_files*,struct param*,struct filter*,std::vector<snp>&,mstream&);
-void read_bgi_file(std::string const&,BgenParser&,geno_file_info*,std::map<std::string,uint64>*,struct param*,mstream&);
 
 void read_bed_bim_fam(struct in_files*,struct param*,struct filter*,std::vector<snp>&,std::map<int,std::vector<int>>&,mstream&);
 void read_bim(struct in_files*,struct param*,struct filter*,std::vector<snp>&,mstream&);

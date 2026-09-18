@@ -24,10 +24,12 @@
 
 */
 
+#include <zlib.h>
+#include <zstd.h>
+
 #include "Regenie.hpp"
 #include "Files.hpp"
 #include "Geno.hpp"
-#include "db/sqlite3.hpp"
 
 using namespace std;
 using namespace Eigen;
@@ -55,8 +57,7 @@ void prep_bgen(struct in_files* files, struct param* params, struct filter* filt
     (params->BGENbits > 0 ? " with " + to_string(params->BGENbits) + "-bit encoding" : "") << ".\n";
 
   // get info for variants
-  if( params->with_bgi ) read_bgi_file(bgen_tmp, files, params, filters, snpinfo, sout);
-  else {
+  {
     tmp_snp.offset = bgen_tmp.get_position();
     while(bgen_tmp.read_variant( &chromosome, &position, &rsid, &alleles )) {
 
@@ -134,6 +135,25 @@ void prep_bgen(struct in_files* files, struct param* params, struct filter* filt
     if(params->interaction_snp && !params->interaction_file && !interaction_snp_found)
       throw "SNP specified for GxG interaction test was not found.";
 
+    // The BGEN spec does not require variants to be ordered, but the block
+    // machinery indexes snpinfo assuming each chromosome is contiguous, and
+    // chr_read assumes a chromosome is never revisited. Reading through the
+    // .bgi used to hide this because bgenix returns rows already sorted.
+    auto snp_order = [](snp const& a, snp const& b){
+      return (a.chrom != b.chrom) ? (a.chrom < b.chrom) : (a.physpos < b.physpos);
+    };
+    if( !std::is_sorted(snpinfo.begin(), snpinfo.end(), snp_order) ){
+      sout << "   -variants are not in (chromosome, position) order; sorting\n";
+      std::stable_sort(snpinfo.begin(), snpinfo.end(), snp_order);
+      files->chr_read.clear();
+      if(params->mk_snp_map) filters->snpID_to_ind.clear();
+      for(size_t i = 0; i < snpinfo.size(); i++){
+        if( files->chr_read.empty() || (snpinfo[i].chrom != files->chr_read.back()) )
+          files->chr_read.push_back(snpinfo[i].chrom);
+        if(params->mk_snp_map) filters->snpID_to_ind[ snpinfo[i].ID ] = i;
+      }
+    }
+
     if (!params->test_mode && (nOutofOrder > 0)) 
       sout << "WARNING: Total number of snps out-of-order in bgen file : " << nOutofOrder << endl;
   }
@@ -173,222 +193,6 @@ void prep_bgen(struct in_files* files, struct param* params, struct filter* filt
     openStream(&files->geno_ifstream, files->bgen_file, ios::in | ios::binary, sout);
 
   if (params->test_mode) params->dosage_mode = true;
-}
-
-
-// read .bgi file to get SNP info
-void read_bgi_file(BgenParser& bgen, struct in_files* files, struct param* params, struct filter* filters, std::vector<snp>& snpinfo, mstream& sout){
-
-  bool interaction_snp_found = false;
-  int nalleles;
-  uint32_t lineread = 0;
-  uint64 variant_bgi_size, variant_bgen_size;
-  string bgi_file = files->bgi_file;
-  string sql_query = "SELECT * FROM Variant", cnd1 = "";
-  snp tmp_snp;
-  sqlite3* db;
-  sqlite3_stmt* stmt;
-
-  uint32_t n_variants = bgen.number_of_variants();
-  uint32_t position ;
-  std::string chromosome, rsid, tmpchrom;
-  std::vector< std::string > alleles ;
-  std::vector< std::vector< double > > probs ;
-
-  // edit sql statement if chromosome position range is given
-  if( params->set_range ){
-    cnd1 = " WHERE ( chromosome IN (" + bgi_chrList(params->range_chr, params->nChrom) + ") AND position>=" + to_string(params->range_min) + " AND position<=" + to_string(params->range_max) + ")";
-  } else if( params->select_chrs ){
-    cnd1 = " WHERE ( chromosome IN (" + bgi_chrList(filters, params->nChrom) + " ) )";
-  }
-  // with GxG tests
-  if(params->interaction_snp && (cnd1.size() > 0)){ // bug fix - only use this if querying on chrs/range
-    cnd1.append(" OR ( rsid = '" + filters->interaction_cov + "' )" );
-  }
-  sql_query.append( cnd1 );
-
-  sout << "   -index bgi file [" << bgi_file<< "]" << endl;
-  if( sqlite3_open( bgi_file.c_str(), &db ) != SQLITE_OK ) 
-    throw  sqlite3_errmsg(db);
-
-
-  // header: chromosome|position|rsid|number_of_alleles|allele1|allele2|file_start_position|size_in_bytes
-  if( sqlite3_prepare_v2( db, sql_query.c_str(), -1, &stmt, NULL ) != SQLITE_OK )
-    throw sqlite3_errmsg(db);
-
-  bool done = false;
-  uint32_t nOutofOrder = 0;
-  while (!done) {
-    switch (sqlite3_step(stmt)) {
-      case SQLITE_ROW:
-
-        chromosome = std::string( (char *) sqlite3_column_text(stmt, 0) );
-        tmp_snp.chrom = chrStrToInt(chromosome, params->nChrom);
-        if (tmp_snp.chrom == -1) 
-          throw "unknown chromosome code in bgi file (=" + chromosome + ").";
-        if( files->chr_read.empty() || (tmp_snp.chrom != files->chr_read.back()) ) files->chr_read.push_back(tmp_snp.chrom);
-
-        tmp_snp.physpos = strtoul( (char *) sqlite3_column_text(stmt, 1), NULL, 10);
-        tmp_snp.ID = std::string( (char *) sqlite3_column_text(stmt, 2) );
-        nalleles = atoi( (char *) sqlite3_column_text(stmt, 3) );
-        assert(nalleles == 2) ; // only bi-allelic allowed
-        if( params->ref_first ){ // reference is first
-          tmp_snp.allele1 = std::string( (char *) sqlite3_column_text(stmt, 4) );
-          tmp_snp.allele2 = std::string( (char *) sqlite3_column_text(stmt, 5) );
-        } else {
-          tmp_snp.allele1 = std::string( (char *) sqlite3_column_text(stmt, 5) );
-          tmp_snp.allele2 = std::string( (char *) sqlite3_column_text(stmt, 4) ); // switch so allele0 is ALT
-        }
-        tmp_snp.offset = strtoull( (char *) sqlite3_column_text(stmt, 6), NULL, 10);
-
-        // check if matches with info from bgenparser for first read variant
-        if( snpinfo.empty() ){
-          bgen.jumpto(tmp_snp.offset);
-          bgen.read_variant( &tmpchrom, &position, &rsid, &alleles );
-          bgen.read_probs( &probs ) ;
-          if( probs[0].size() != 3 ) // unphased only 
-            throw "only unphased bgen are supported.";
-          variant_bgen_size = bgen.get_position() - tmp_snp.offset;
-          variant_bgi_size = strtoull( (char *) sqlite3_column_text(stmt, 7), NULL, 10);
-          // check CPRA
-          assert( chromosome == tmpchrom );
-          assert( tmp_snp.physpos == position );
-          assert( ( (tmp_snp.allele1 == alleles[0]) && (tmp_snp.allele2 == alleles[1]) ) || ( (tmp_snp.allele1 == alleles[1]) && (tmp_snp.allele2 == alleles[0])) );
-          assert( variant_bgi_size == variant_bgen_size );
-        }
-
-        // check if snps are in order (same chromosome & non-decreasing positions)
-        if (!snpinfo.empty()
-            && (tmp_snp.chrom == snpinfo.back().chrom)
-            && ( (tmp_snp.physpos < snpinfo.back().physpos) ))
-          nOutofOrder++;
-
-        lineread++;
-
-        // if using GxG interaction test
-        if(params->interaction_snp && (tmp_snp.ID == filters->interaction_cov)){
-          if(!params->interaction_file) {
-            params->interaction_snp_offset = tmp_snp.offset;
-            params->ltco_chr = tmp_snp.chrom;
-            interaction_snp_found = true;
-          }
-          continue; // don't save it
-        }
-
-        // make list of variant IDs if inclusion/exclusion file is given
-        if(params->mk_snp_map){
-          if (in_map(tmp_snp.ID, filters->snpID_to_ind))
-            continue; // don't save it
-          filters->snpID_to_ind[ tmp_snp.ID ] = snpinfo.size();
-        }
-
-        // keep track of how many included snps per chromosome there are
-        files->chr_counts[tmp_snp.chrom-1]++;
-
-        snpinfo.push_back(tmp_snp);
-        break;
-
-      case SQLITE_DONE:
-        done = true;
-        break;
-
-      default:
-        throw "failed reading file (" + std::string( sqlite3_errmsg(db) ) + ").";
-    }
-  }
-
-  sqlite3_finalize(stmt);
-  sqlite3_close(db);
-
-  if(params->interaction_snp && !params->interaction_file && !interaction_snp_found)
-    throw "SNP specified for GxG interaction test was not found.";
-
-  if( !params->set_range && !params->select_chrs) assert( lineread == n_variants );
-  if (!params->test_mode && (nOutofOrder > 0)) sout << "WARNING: Total number of snps out-of-order in bgen file : " << nOutofOrder << endl;
-
-}
-
-void read_bgi_file(string const& setting, BgenParser& bgen, geno_file_info* ext_file_info, map <string, uint64>* variant_names, struct param* params, mstream& sout){
-
-  uint32_t lineread = 0;
-  uint64 offset, variant_bgi_size, variant_bgen_size;
-  string bgi_file = ext_file_info->file + ".bgi";
-  string sql_query, rsid;
-  map <string, uint64> tmp_map;
-  sqlite3* db;
-  sqlite3_stmt* stmt;
-
-  int nalleles, chrom;
-  uint32_t position ;
-  std::string tmp_str, chr;
-  std::vector< std::string > alleles ;
-  std::vector< std::vector< double > > probs ;
-
-  // sql statement to pass variants to keep
-  sql_query = "SELECT * FROM Variant WHERE rsid IN (" + bgi_rsidList((*variant_names)) + " )";
-
-  sout << "      -index bgi file [" << bgi_file<< "]" << endl;
-  if( sqlite3_open( bgi_file.c_str(), &db ) != SQLITE_OK ) 
-    throw  sqlite3_errmsg(db);
-
-  // header: chromosome|position|rsid|number_of_alleles|allele1|allele2|file_start_position|size_in_bytes
-  if( sqlite3_prepare_v2( db, sql_query.c_str(), -1, &stmt, NULL ) != SQLITE_OK )
-    throw sqlite3_errmsg(db);
-
-  bool done = false;
-  while (!done) {
-    switch (sqlite3_step(stmt)) {
-      case SQLITE_ROW:
-
-        nalleles = atoi( (char *) sqlite3_column_text(stmt, 3) );
-        assert(nalleles == 2) ; // only bi-allelic allowed
-
-        rsid = std::string( (char *) sqlite3_column_text(stmt, 2) );
-        offset = strtoull( (char *) sqlite3_column_text(stmt, 6), NULL, 10);
-        // make list of variant IDs
-        tmp_map[ rsid ] = offset;
-
-        // check if matches with info from bgenparser for first read variant
-        if( lineread++ == 0 ){
-          bgen.jumpto(offset);
-          bgen.read_variant( &chr, &position, &tmp_str, &alleles );
-          bgen.read_probs( &probs ) ;
-          if( probs[0].size() != 3 ) // unphased only 
-            throw "only unphased bgen are supported.";
-          variant_bgen_size = bgen.get_position() - offset;
-          variant_bgi_size = strtoull( (char *) sqlite3_column_text(stmt, 7), NULL, 10);
-          assert( tmp_str == rsid );
-          assert( variant_bgi_size == variant_bgen_size );
-          if(setting == "interaction") {
-            chrom = chrStrToInt(chr, params->nChrom);
-            if (chrom <= 0) 
-              throw "unknown chromosome code in bgen file.";
-            params->ltco_chr = chrom;
-          }
-        }
-
-        break;
-
-      case SQLITE_DONE:
-        done = true;
-        break;
-
-      default:
-        throw "failed reading file (" + std::string( sqlite3_errmsg(db) ) + ").";
-    }
-  }
-
-  sqlite3_finalize(stmt);
-  sqlite3_close(db);
-
-  if(tmp_map.size() > params->max_condition_vars) // not relevant for gxg(=1)
-    throw "number of variants used for conditional analysis is greater than maximum of " + to_string(params->max_condition_vars) + " (otherwise use --max-condition-vars)";
-  else if(tmp_map.size() == 0)
-    throw "no variants were found in the BGEN file";
-
-  // replace with new map
-  (*variant_names) = tmp_map;
-
 }
 
 
@@ -1830,129 +1634,13 @@ void check_bgen(const string& bgen_file, string const& file_type, bool& zlib_com
 
   BgenParser bgen_ck;
   bgen_ck.open( bgen_file ) ;
-  bool layoutV2 = bgen_ck.get_layout();
   zlib_compress = bgen_ck.get_compression();
-  if( !layoutV2 ){
-    streamBGEN = false;
-    return;
-  }
-  uint64 first_snp = bgen_ck.get_position();
 
-  uint minploidy = 0, maxploidy = 0, phasing = 0, bits_prob = 0;
-  uint16_t SNPID_size = 0, RSID_size = 0, chromosome_size = 0 , numberOfAlleles = 0 ;
-  uint32_t position = 0, allele_size = 0, nindivs = 0;
-  string allele, tmp_buffer;
-
-  // check bits only for first snp
-  //cout << endl << "Snp1 pos:" << first_snp << endl;
-  ifstream bfile;
-  bfile.open( bgen_file, ios::in | ios::binary );
-  bfile.seekg( first_snp );
-  // snpid
-  bfile.read( reinterpret_cast<char *> (&SNPID_size), 2 );
-  tmp_buffer.resize(SNPID_size);
-  bfile.read( reinterpret_cast<char *> (&tmp_buffer[0]), SNPID_size );
-  // rsid
-  bfile.read( reinterpret_cast<char *> (&RSID_size), 2) ;
-  tmp_buffer.resize(RSID_size);
-  bfile.read( reinterpret_cast<char *> (&tmp_buffer[0]), RSID_size );
-  //cout << "RSID:" << tmp_buffer ;
-  // chromosome
-  bfile.read( reinterpret_cast<char *> (&chromosome_size), 2 );
-  tmp_buffer.resize(chromosome_size);
-  bfile.read( reinterpret_cast<char *> (&tmp_buffer[0]), chromosome_size );
-  assert( chrStrToInt(tmp_buffer , nChrom) > 0 );
-  //cout << ",CHR:" << tmp_buffer ;
-  // position
-  bfile.read( reinterpret_cast<char *> (&position), 4 );
-  //cout << ",POS:" << position << endl;
-  // number of alleles
-  bfile.read( reinterpret_cast<char *> (&numberOfAlleles), 2 );
-  assert( numberOfAlleles == 2 ); // only diploid
-  //cout << ",Nalleles:" << numberOfAlleles ;
-  // alleles
-  bfile.read( reinterpret_cast<char *> (&allele_size), 4 );
-  tmp_buffer.resize(allele_size);
-  bfile.read( reinterpret_cast<char *> (&tmp_buffer[0]), allele_size );
-  //cout << ",A0:"<<tmp_buffer ;
-  bfile.read( reinterpret_cast<char *> (&allele_size), 4 );
-  tmp_buffer.resize(allele_size);
-  bfile.read( reinterpret_cast<char *> (&tmp_buffer[0]), allele_size );
-  //cout << ",A1:"<<tmp_buffer ;
-
-  // set genotype data block
-  vector < uchar > geno_block, geno_block_uncompressed;
-  uint32_t size_block = 0, size_block_post_compression = 0;
-  bfile.read( reinterpret_cast<char *> (&size_block), 4 );
-  bfile.read( reinterpret_cast<char *> (&size_block_post_compression), 4);
-  //cout << ",block size:"<<size_block  << ",block size post compress:" << size_block_post_compression << endl;
-  geno_block.resize(size_block - 4);
-  geno_block_uncompressed.resize(size_block_post_compression);
-  bfile.read( reinterpret_cast<char *> (&geno_block[0]), size_block - 4);
-
-  // uncompress the block
-  //cout << "zlib:"<< std::boolalpha << zlib_compress ;
-  if(zlib_compress){ // using zlib
-    uLongf dest_size = size_block_post_compression;
-    if( (uncompress( &(geno_block_uncompressed[0]), &dest_size, &geno_block[0], size_block - 4) != Z_OK) || (dest_size != size_block_post_compression) ){
-      streamBGEN = false;
-      return;
-    }
-  } else { // using zstd
-    size_t const dest_size = ZSTD_decompress(&(geno_block_uncompressed[0]), size_block_post_compression, &geno_block[0], size_block - 4) ;
-    //cerr << size_block_post_compression << " " << dest_size << " " << size_block - 4 <<endl;
-    if( dest_size != size_block_post_compression ){
-      streamBGEN = false;
-      return;
-    }
-  }
-
-  // stream to uncompressed block
-  uchar *buffer = &geno_block_uncompressed[0];
-  // sample size
-  std::memcpy(&nindivs, &(buffer[0]), 4);
-  //cout << "N:"<< nindivs ;
-  assert( ((int) nindivs) == bgen_ck.number_of_samples() );
-  buffer += 4;
-  // num alleles
-  std::memcpy(&numberOfAlleles, &(buffer[0]), 2);
-  //cout << ",allele:"<< numberOfAlleles ;
-  assert( numberOfAlleles == 2 );
-  buffer += 2;
-  // ploidy
-  std::memcpy(&minploidy, &(buffer[0]), 1);
-  //cout << ",minP:"<< minploidy ;
-  assert( minploidy == 2 );
-  buffer ++;
-  std::memcpy(&maxploidy, &(buffer[0]), 1);
-  //cout << ",maxP:"<< maxploidy ;
-  assert( maxploidy == 2 );
-  buffer ++;
-
-  /* //to identify missing when getting dosages
-     vector < uchar > ploidy_n;
-     ploidy_n.resize( nindivs );
-     std::memcpy(&(ploidy_n[0]), &(buffer[0]), nindivs);
-     */
-  buffer += nindivs;
-
-  // phasing
-  std::memcpy(&phasing, &(buffer[0]), 1);
-  //cout << ",phasing:"<< phasing ;
-  assert( phasing == 0 ); // must be unphased
-  buffer ++;
-
-  // bits per probability
-  std::memcpy(&bits_prob, &(buffer[0]), 1);
-  //cout << ",bits:"<< bits_prob ;
-  BGENbits = bits_prob;;
-  if( bits_prob != 8 ){
-    streamBGEN = false;
-    return;
-  }
-
-  streamBGEN = true;
-  bfile.close();
+  // regenie decodes the genotype blocks itself on the fast path, which only
+  // handles layout-2 with 8-bit probabilities
+  BGENbits = bgen_ck.get_nbits();
+  streamBGEN = bgen_ck.get_layout() && (BGENbits == 8);
+  (void) nChrom;
 }
 
 
@@ -2121,10 +1809,7 @@ void readChunkFromBGENFileToG(vector<uint64> const& indices, const int& chrom, v
 // for step 2 (read in raw data)
 void readChunkFromBGEN(std::istream* bfile, vector<uint32_t>& insize, vector<uint32_t>& outsize, vector<vector<uchar>>& snp_data_blocks, vector<uint64>& indices){
 
-  uint16_t SNPID_size = 0, RSID_size = 0, chromosome_size = 0 , numberOfAlleles = 0 ;
-  uint32_t position = 0, allele_size = 0;
   int n_snps = indices.size();
-  string tmp_buffer;
 
   // extract genotype data blocks single-threaded
   for(int isnp = 0; isnp < n_snps; isnp++) {
@@ -2136,31 +1821,8 @@ void readChunkFromBGEN(std::istream* bfile, vector<uint32_t>& insize, vector<uin
 
     bfile->seekg( indices[isnp] );
 
-    // snpid
-    bfile->read( reinterpret_cast<char *> (&SNPID_size), 2 );
-    tmp_buffer.resize(SNPID_size);
-    bfile->read( reinterpret_cast<char *> (&tmp_buffer[0]), SNPID_size );
-    // rsid
-    bfile->read( reinterpret_cast<char *> (&RSID_size), 2) ;
-    tmp_buffer.resize(RSID_size);
-    bfile->read( reinterpret_cast<char *> (&tmp_buffer[0]), RSID_size );
-    // chromosome
-    bfile->read( reinterpret_cast<char *> (&chromosome_size), 2 );
-    tmp_buffer.resize(chromosome_size);
-    bfile->read( reinterpret_cast<char *> (&tmp_buffer[0]), chromosome_size );
-    // position
-    bfile->read( reinterpret_cast<char *> (&position), 4 );
-    // number of alleles
-    bfile->read( reinterpret_cast<char *> (&numberOfAlleles), 2 );
-    // alleles
-    bfile->read( reinterpret_cast<char *> (&allele_size), 4 );
-    tmp_buffer.resize(allele_size);
-    bfile->read( reinterpret_cast<char *> (&tmp_buffer[0]), allele_size );
-    bfile->read( reinterpret_cast<char *> (&allele_size), 4 );
-    tmp_buffer.resize(allele_size);
-    bfile->read( reinterpret_cast<char *> (&tmp_buffer[0]), allele_size );
-
-    // set genotype data block
+    // indices[] are genotype-block offsets from the metafile, so the variant's
+    // identifying data has already been skipped
     bfile->read( reinterpret_cast<char *> (size1), 4 );
     bfile->read( reinterpret_cast<char *> (size2), 4);
     geno_block->resize(*size1 - 4);
@@ -4246,9 +3908,14 @@ void extract_from_genofile(string const& setting, Ref<MatrixXd> Gmat, bool const
   if(params->debug) cerr << geno_info.sample_keep.count() << " " << tmp_map.size() << "\n\n" << geno_info.sample_index.head(10) << "\n\n";
 
   
-  if(!ext_file_info->with_bgi) { // filter using map
+  // filter using map
+  {
     get_snps_offset((*variant_names), tmp_map, sout);
-    if(setting == "interaction") params->ltco_chr = tmp_map[filters->interaction_cov][1];
+    if(setting == "interaction") {
+      if(!in_map(filters->interaction_cov, tmp_map))
+        throw "SNP specified for GxG interaction test was not found.";
+      params->ltco_chr = tmp_map[filters->interaction_cov][1];
+    }
   }
 
   // check number of variants
@@ -4310,8 +3977,7 @@ void setup_bgen(string const& setting, struct ext_geno_info& ginfo, geno_file_in
   bgen_tmp.open( ext_file_info->file ) ;
 
   // get info for variants
-  if( ext_file_info->with_bgi ) read_bgi_file(setting, bgen_tmp, ext_file_info, variant_names, params, sout);
-  else {
+  {
     offset = bgen_tmp.get_position();
     while(bgen_tmp.read_variant( &chromosome, &position, &rsid, &alleles )) {
 

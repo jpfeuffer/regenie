@@ -1,9 +1,9 @@
 #
 # Makefile to compile PGEN library
 #
-# Pass WITH_S3=1 to include AWS S3 streaming support (plink2_s3.cc).
-# Pass AWS_INCLUDES="-I/path/to/aws/include" when headers are not in the
-# default search path (required when WITH_S3=1).
+# Pass WITH_S3=1 to include S3/HTTP streaming support. That builds the bundled
+# s3stream/ (curl + SigV4, no AWS SDK) along with plink2_s3.cc, and requires
+# libcurl >= 7.75.0 at link time.
 #
 AR         ?= ar
 CXX        ?= g++
@@ -15,10 +15,11 @@ ifeq ($(UNAME_S),Darwin)
  CXXFLAGS += -arch arm64
 endif
 
-# WITH_S3=1: compile plink2_s3.cc and enable USE_S3 in pgenlib_read.cc
+# WITH_S3=1: compile plink2_s3.cc plus s3stream/, and enable USE_S3 in
+# pgenlib_read.cc
 ifeq ($(WITH_S3),1)
- CXXFLAGS   += -DUSE_S3 $(AWS_INCLUDES)
- S3_OBJECTS  = plink2_s3.o
+ CXXFLAGS   += -DUSE_S3 -DS3STREAM_ENABLE
+ S3_OBJECTS  = plink2_s3.o $(patsubst %.cc,%.o,$(wildcard ./s3stream/*.cc))
 else
  S3_OBJECTS  =
 endif
@@ -41,4 +42,4 @@ pgenlib.a: ${OBJECTS}
 	${CXX} ${CXXFLAGS} -o $@ -c $< ${INC}
 
 clean:
-	rm -f *.o *.a ./include/*.o
+	rm -f *.o *.a ./include/*.o ./s3stream/*.o

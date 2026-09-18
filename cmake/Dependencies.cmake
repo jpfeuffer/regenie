@@ -116,6 +116,8 @@ set(REGENIE_HAVE_S3 OFF)
 if(WITH_S3)
   if(TARGET BGEN::s3)
     set(REGENIE_HAVE_S3 ON)
+    # pgenlib carries its own copy of the same curl-based reader.
+    find_package(CURL REQUIRED)
     message(STATUS "regenie: remote input enabled (BGEN::s3)")
   else()
     message(WARNING

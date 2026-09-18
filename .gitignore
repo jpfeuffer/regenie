@@ -27,3 +27,6 @@ external_libs/**/*.o
 .idea/
 *.swp
 *.swo
+
+# bgen metafile indexes are generated on first use
+*.bgen.metafile

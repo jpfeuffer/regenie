@@ -18,11 +18,13 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 // Optional S3 support for PLINK 2.0.  Enable by building with USE_S3=1,
-// which requires the AWS C++ SDK (aws-sdk-cpp) with the s3 and core
-// components installed.
+// which requires libcurl (>= 7.75.0, for its SigV4 request signing) and
+// nothing else.
 //
-// When USE_S3 is enabled, S3 objects are streamed on-demand via HTTP range
-// requests — no temporary files are written to disk.
+// S3 objects and presigned HTTP(S) URLs are streamed on demand via HTTP range
+// requests -- no temporary files are written to disk.  The implementation
+// lives in s3stream/, which is self-contained and knows nothing about plink2;
+// this header is the plink2-facing adapter.  See S3_README.md.
 
 #include <stdio.h>
 
@@ -32,48 +34,64 @@
 namespace plink2 {
 #endif
 
-// Returns 1 if path begins with "s3://", 0 otherwise.
-// This check is always available regardless of whether USE_S3 is defined,
-// so that a helpful error message can be printed when S3 URIs are detected
+// Returns 1 if path names a remote object: "s3://", "http://" or "https://".
+// This check is always available regardless of whether USE_S3 is defined, so
+// that a helpful error message can be printed when a remote path is detected
 // but S3 support was not compiled in.
 uint32_t IsS3Uri(const char* path);
 
-#ifdef USE_S3
+// Idempotent, thread-safe, and always callable regardless of whether USE_S3
+// was compiled in (a no-op in that case).  Intended for hosts without an
+// obvious "before main()" hook to call S3Init() from, e.g. the Python
+// bindings, where object construction is the earliest place S3 support can
+// be wired in.
+void EnsureS3Ready();
 
-// Initialize the AWS SDK.  Must be called once before any S3 file opens,
-// and before any threads that use the SDK are spawned.
-void S3Init();
+// Send unsigned requests only, for public buckets (the equivalent of
+// `aws s3 --no-sign-request`).  Always callable regardless of whether USE_S3
+// was compiled in (a no-op in that case).
+void S3SetNoSignRequest(uint32_t no_sign);
 
-// Shut down the AWS SDK.  Must be called once at program exit, after all S3
-// FILE* handles have been closed.
-void S3Shutdown();
+// Explicit, per-open S3 credentials, letting different files in the same
+// process use completely different accounts/buckets/endpoints -- unlike
+// OpenMaybeS3(), which resolves credentials from the ambient environment and
+// profile.  Any field left null/0 falls back to the usual default for that
+// setting (the standard credential chain if no keys are given and
+// no_sign_request is 0).
+struct S3Credentials {
+  const char* access_key_id;
+  const char* secret_access_key;
+  const char* session_token;
+  const char* endpoint_url;
+  const char* region;
+  uint32_t no_sign_request;
+  uint32_t force_path_style;
+};
 
-// Initialize only the S3 client, assuming Aws::InitAPI() has already been
-// called by the hosting application (e.g. regenie's aws_sdk_init()).
-// Use this when you want to share a single Aws::InitAPI call across multiple
-// SDK consumers.
-void S3InitClientOnly();
+// Opens a remote object using explicit credentials rather than the ambient
+// chain, so it has zero effect on any other file opened in the same process
+// (compare to environment variables, which are process-global).  Otherwise
+// behaves like OpenMaybeS3(): streams via range requests, returns nullptr on
+// failure.  `creds` must be non-null.  Always callable regardless of whether
+// USE_S3 was compiled in; without it, prints an error and returns nullptr.
+FILE* OpenS3WithCredentials(const char* path, const S3Credentials* creds);
 
-// Shut down only the S3 client without calling Aws::ShutdownAPI().
-// Counterpart to S3InitClientOnly().
-void S3ShutdownClientOnly();
-
-// Open an S3 object for reading and return a FILE* that streams data on
-// demand using S3 range requests.  Behaves like fopen(path, "rb") but the
-// data is fetched from S3 in chunks rather than from a local file.
-//
-// Returns nullptr on failure (e.g. object not found, access denied, network
-// error).  An error message is printed to stderr before returning nullptr.
+// Opens a remote object for reading and returns a FILE* that streams data on
+// demand using range requests; local paths fall through to
+// fopen(path, "rb").  Returns nullptr on failure, after printing the reason
+// to stderr.
 FILE* OpenMaybeS3(const char* path);
 
-#else
+#ifdef USE_S3
 
-// Without USE_S3, OpenMaybeS3 is a thin wrapper around fopen, allowing
-// callers in plink2_text.cc / pgenlib_read.cc to compile unchanged
-// regardless of whether USE_S3 is set.
-static inline FILE* OpenMaybeS3(const char* path) {
-  return fopen(path, FOPEN_RB);
-}
+// Initializes libcurl.  Should be called once before any S3 file is opened,
+// and before spawning threads that open S3 files.  EnsureS3Ready() does the
+// same thing for hosts without a convenient startup hook.
+void S3Init();
+
+// Counterpart to S3Init(), called once at program exit after all S3 FILE*
+// handles have been closed.
+void S3Shutdown();
 
 #endif  // USE_S3
 

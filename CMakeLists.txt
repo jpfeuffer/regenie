@@ -11,6 +11,11 @@ if(POLICY CMP0167)
   cmake_policy(SET CMP0167 NEW)
 endif()
 
+# Imported targets' include dirs are passed with -I, not -isystem. -isystem
+# paths are searched after /usr/local/include, so a stale library installed
+# there silently shadows the one find_package actually resolved.
+set(CMAKE_NO_SYSTEM_FROM_IMPORTED ON)
+
 # Get Regenie version
 file(STRINGS "VERSION" RG_VERSION)
 
@@ -39,12 +44,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)  # Ensures -std=c++17
 # Remote input (s3:// and http(s)://) through BGEN::s3; curl-based SigV4.
 option(WITH_S3 "Enable reading s3:// and http(s):// inputs" ON)
 
-# Use the pure-C cquadpack integrator instead of the Fortran quadpack library
-# (removes the gfortran build/link dependency)
-option(USE_C_QUADPACK "Use pure C cquadpack instead of Fortran quadpack" OFF)
+# The pure-C cquadpack integrator produces bit-identical SKAT-O p-values to the
+# Fortran quadpack it replaces, and removes the gfortran build/link dependency.
+# Set OFF to fall back to Fortran quadpack.
+option(USE_C_QUADPACK "Use pure C cquadpack instead of Fortran quadpack" ON)
 
 option(HAS_BOOST_IOSTREAM "Read and write gzipped files via Boost.Iostreams" OFF)
 option(BUILD_STATIC "Link libgcc/libstdc++ statically (Linux)" OFF)
+
+# qfc.cpp keeps upstream's file-scope state; qf_mt() is reentrant.
+option(WITH_THREADSAFE_QF "Use the thread-safe qf_mt() in SKAT-O" OFF)
 
 # -ffast-math implies -ffinite-math-only, which lets the compiler assume no NaN
 # reaches the isnan() guards that regenie uses for missing data. Historically
@@ -107,6 +116,7 @@ target_compile_definitions(regenie PRIVATE
   $<$<BOOL:${HAS_BOOST_IOSTREAM}>:HAS_BOOST_IOSTREAM>
   $<$<BOOL:${REGENIE_HAVE_S3}>:WITH_S3>
   $<$<BOOL:${REGENIE_HAVE_HTSLIB}>:WITH_HTSLIB>
+  $<$<BOOL:${WITH_THREADSAFE_QF}>:WITH_THREADSAFE_QF>
   $<$<BOOL:${USE_C_QUADPACK}>:USE_C_QUADPACK>)
 
 # -O3 comes from the Release build type; only the warning selection and the
@@ -138,7 +148,9 @@ if(BUILD_STATIC AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 set(EXTERN_LIBS_PATH "${CMAKE_SOURCE_DIR}/external_libs")
-target_include_directories(regenie PRIVATE ${EXTERN_LIBS_PATH}/)
+target_include_directories(regenie PRIVATE
+  ${EXTERN_LIBS_PATH}/
+  ${EXTERN_LIBS_PATH}/mvtnorm/)
 
 target_link_libraries(regenie PRIVATE BGEN::bgen)
 
@@ -147,76 +159,29 @@ if(REGENIE_HAVE_S3)
 endif()
 
 
-# MVTNorm library
-set(MVTN_PATH "${EXTERN_LIBS_PATH}/mvtnorm")
-add_custom_target(
-   libMvtnorm
-   COMMAND ${CMAKE_MAKE_PROGRAM}
-   WORKING_DIRECTORY ${MVTN_PATH}
-)
-target_link_libraries(regenie PRIVATE ${MVTN_PATH}/libMvtnorm.a)
-add_dependencies(regenie libMvtnorm)
+# Vendored numerical kernels and readers. These have no upstream packaging, so
+# they stay in-tree, but they are built as ordinary CMake targets rather than by
+# shelling out to their Makefiles.
+add_subdirectory(${EXTERN_LIBS_PATH}/mvtnorm)
+add_subdirectory(${EXTERN_LIBS_PATH}/qf)
+add_subdirectory(${EXTERN_LIBS_PATH}/pgenlib)
 
-# QF library
-set(QF_PATH "${EXTERN_LIBS_PATH}/qf")
-add_custom_target(
-   libqf
-   COMMAND ${CMAKE_MAKE_PROGRAM}
-   WORKING_DIRECTORY ${QF_PATH}
-)
-target_link_libraries(regenie PRIVATE ${QF_PATH}/qf.a)
-add_dependencies(regenie libqf)
+target_link_libraries(regenie PRIVATE
+  regenie::mvtnorm
+  regenie::qf
+  regenie::pgenlib)
 
-# Quadpack library (Fortran quadpack, or pure-C cquadpack when USE_C_QUADPACK=ON)
 if(USE_C_QUADPACK)
-  set(QUAD_PATH "${EXTERN_LIBS_PATH}/cquadpack")
-  add_custom_target(
-     libquad
-     COMMAND ${CMAKE_MAKE_PROGRAM}
-     WORKING_DIRECTORY ${QUAD_PATH}
-  )
-  target_link_libraries(regenie PRIVATE ${QUAD_PATH}/libcquadpack.a)
-  target_include_directories(regenie PRIVATE ${QUAD_PATH})
+  add_subdirectory(${EXTERN_LIBS_PATH}/cquadpack)
+  target_link_libraries(regenie PRIVATE regenie::cquadpack)
 else()
-  set(QUAD_PATH "${EXTERN_LIBS_PATH}/quadpack")
-  add_custom_target(
-     libquad
-     COMMAND ${CMAKE_MAKE_PROGRAM}
-     WORKING_DIRECTORY ${QUAD_PATH}
-  )
-  target_link_libraries(regenie PRIVATE ${QUAD_PATH}/libquad.a)
-  # gfortran is only needed to link the Fortran quadpack library
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_libraries(regenie PRIVATE gfortran)
-  else()
-    find_library(GFORTRAN_LIBRARY gfortran REQUIRED)
-    target_link_libraries(regenie PRIVATE ${GFORTRAN_LIBRARY})
-  endif()
+  add_subdirectory(${EXTERN_LIBS_PATH}/quadpack)
+  target_link_libraries(regenie PRIVATE regenie::quadpack)
 endif()
-add_dependencies(regenie libquad)
 
-# PGEN library
-set(PGEN_PATH "${EXTERN_LIBS_PATH}/pgenlib")
-add_custom_target(
-   pgenlib
-   COMMAND ${CMAKE_MAKE_PROGRAM} CXX=${CMAKE_CXX_COMPILER}
-   WORKING_DIRECTORY ${PGEN_PATH}
-)
-target_link_libraries(regenie PRIVATE ${PGEN_PATH}/pgenlib.a)
-target_include_directories(regenie PRIVATE ${PGEN_PATH} ${PGEN_PATH}/simde/ ${PGEN_PATH}/include/)
-add_dependencies(regenie pgenlib)
-
-# REMETA library
 if(REGENIE_HAVE_HTSLIB)
-  set(REMETA_PATH "${EXTERN_LIBS_PATH}/remeta")
-  add_custom_target(
-     remeta
-     COMMAND ${CMAKE_MAKE_PROGRAM} HTSLIB_PATH=${REGENIE_HTSLIB_PATH}
-     WORKING_DIRECTORY ${REMETA_PATH}
-  )
-  target_link_libraries(regenie PRIVATE ${REMETA_PATH}/remeta.a regenie::htslib)
-  target_include_directories(regenie PRIVATE ${REMETA_PATH})
-  add_dependencies(regenie remeta)
+  add_subdirectory(${EXTERN_LIBS_PATH}/remeta)
+  target_link_libraries(regenie PRIVATE regenie::remeta)
 endif()
 
 # BLAS backend for Eigen (resolved in cmake/Dependencies.cmake)
@@ -235,10 +200,3 @@ endif()
 
 install(TARGETS regenie RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 message(STATUS "REGENIE v${RG_VERSION}")
-
-add_custom_target(full-clean
-  COMMAND ${CMAKE_MAKE_PROGRAM} -C "${MVTN_PATH}" clean
-  COMMAND ${CMAKE_MAKE_PROGRAM} -C "${QF_PATH}" clean
-  COMMAND ${CMAKE_MAKE_PROGRAM} -C "${QUAD_PATH}" clean
-  COMMAND ${CMAKE_MAKE_PROGRAM} -C "${PGEN_PATH}" clean
-  )
