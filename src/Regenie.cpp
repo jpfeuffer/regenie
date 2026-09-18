@@ -1438,7 +1438,11 @@ void check_file(string const& infile, string const& option_name){
 
   if(infile == "") 
     throw "Invalid argument (=' ') specified for option --" + option_name;
-  else if(!file_exists (infile))
+  // stat() has no notion of s3://; existence there is left to whatever
+  // actually opens the file, which already reports a specific, correct
+  // error (e.g. BgenParser's remote-metafile guard) rather than this
+  // generic one.
+  else if(!is_remote_path(infile) && !file_exists (infile))
     throw infile + " doesn't exist for option --" + option_name;
 
 }
