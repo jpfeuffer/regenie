@@ -17,16 +17,22 @@ CMakeCache.txt
 cmake_install.cmake
 
 # Compiled libraries and objects
+external_libs/*/*.[oa]
+external_libs/*/*/*.o
+external_libs/*/*/*/*.o
 external_libs/**/*.a
 external_libs/**/*.o
 *.so
 *.obj
 
-# IDE settings
+# IDE / agent settings
 .vscode/
 .idea/
 *.swp
 *.swo
+.claude/
+.claudeignore
+CLAUDE.md
 
 # bgen metafile indexes are generated on first use
 *.bgen.metafile
