@@ -189,8 +189,14 @@ void prep_bgen(struct in_files* files, struct param* params, struct filter* filt
   // setup file for reading the genotype probabilities later
   if( !params->streamBGEN ) 
     bgen.open( files->bgen_file ) ;
-  else
-    openStream(&files->geno_ifstream, files->bgen_file, ios::in | ios::binary, sout);
+  else {
+    files->geno_handle = stream_handle_open(files->bgen_file.c_str());
+    if(files->geno_handle == nullptr){
+      std::string detail = s3stream_last_error();
+      throw "cannot open bgen file for reading genotypes : " + files->bgen_file +
+        (detail.empty() ? "" : " (" + detail + ")");
+    }
+  }
 
   if (params->test_mode) params->dosage_mode = true;
 }
@@ -1384,7 +1390,7 @@ void readChunkFromBGENFileToG_fast(const int& bs, const int& chrom, const uint32
   snp_data_blocks.resize( bs );
   for (int i = 0; i < bs; i++) indices[i] = snpinfo[start + i].offset;
 
-  readChunkFromBGEN(&files->geno_ifstream, insize, outsize, snp_data_blocks, indices);
+  readChunkFromBGEN(files->geno_handle, insize, outsize, snp_data_blocks, indices);
 
   // unpack data for each variant
 #if defined(_OPENMP)
@@ -1807,7 +1813,7 @@ void readChunkFromBGENFileToG(vector<uint64> const& indices, const int& chrom, v
 }
 
 // for step 2 (read in raw data)
-void readChunkFromBGEN(std::istream* bfile, vector<uint32_t>& insize, vector<uint32_t>& outsize, vector<vector<uchar>>& snp_data_blocks, vector<uint64>& indices){
+void readChunkFromBGEN(stream_handle* bfile, vector<uint32_t>& insize, vector<uint32_t>& outsize, vector<vector<uchar>>& snp_data_blocks, vector<uint64>& indices){
 
   int n_snps = indices.size();
 
@@ -1819,14 +1825,16 @@ void readChunkFromBGEN(std::istream* bfile, vector<uint32_t>& insize, vector<uin
     uint32_t* size1 = &insize[isnp];
     uint32_t* size2 = &outsize[isnp];
 
-    bfile->seekg( indices[isnp] );
+    if(stream_handle_seek( bfile, static_cast<int64_t>(indices[isnp]), SEEK_SET ) != 0)
+      throw "cannot seek to genotype block at offset " + std::to_string(indices[isnp]);
 
     // indices[] are genotype-block offsets from the metafile, so the variant's
     // identifying data has already been skipped
-    bfile->read( reinterpret_cast<char *> (size1), 4 );
-    bfile->read( reinterpret_cast<char *> (size2), 4);
+    stream_handle_read( bfile, size1, 4 );
+    stream_handle_read( bfile, size2, 4 );
     geno_block->resize(*size1 - 4);
-    bfile->read( reinterpret_cast<char *> (&((*geno_block)[0])), *size1 - 4);
+    if(stream_handle_read( bfile, &((*geno_block)[0]), *size1 - 4 ) != static_cast<int64_t>(*size1 - 4))
+      throw "cannot read genotype block at offset " + std::to_string(indices[isnp]);
 
   }
 
@@ -4038,7 +4046,6 @@ void read_snps_bgen(bool const& mean_impute, map<string, uint64>& snp_map, Ref<M
   vector<uint64> indices;
   ArrayXb read_error = ArrayXb::Constant(bs, false);
   std::map <std::string, uint64>::iterator itr;
-  std::ifstream bgen_ifstream;
 
   snp_data_blocks.resize( bs );
   insize.resize( bs );
@@ -4048,8 +4055,19 @@ void read_snps_bgen(bool const& mean_impute, map<string, uint64>& snp_map, Ref<M
     indices.push_back(itr->second);
   std::sort(indices.begin(), indices.end());// sort indices to read in order
 
-  bgen_ifstream.open( bgen_file, ios::in | ios::binary);
-  readChunkFromBGEN(&bgen_ifstream, insize, outsize, snp_data_blocks, indices);
+  stream_handle* bgen_stream = stream_handle_open( bgen_file.c_str() );
+  if(bgen_stream == nullptr){
+    std::string detail = s3stream_last_error();
+    throw "cannot open bgen file : " + bgen_file +
+      (detail.empty() ? "" : " (" + detail + ")");
+  }
+  try {
+    readChunkFromBGEN(bgen_stream, insize, outsize, snp_data_blocks, indices);
+  } catch(...) {
+    stream_handle_close(bgen_stream);
+    throw;
+  }
+  stream_handle_close(bgen_stream);
 
 
   // unpack data for each variant
@@ -4153,7 +4171,6 @@ void read_snps_bgen(bool const& mean_impute, map<string, uint64>& snp_map, Ref<M
   setNbThreads(params->threads);
 #endif
 
-  bgen_ifstream.close();
   if(read_error.any())
     throw "failed to decompress genotype data block.";
 

@@ -2966,7 +2966,7 @@ void Data::readChunk(vector<uint64>& indices, int const& chrom, vector< vector <
     vector<uint64> offsets(n_snps);
     for (int i = 0; i < n_snps; i++) offsets[i] = snpinfo[indices[i]].offset;
 
-    readChunkFromBGEN(&files.geno_ifstream, insize, outsize, snp_data_blocks, offsets);
+    readChunkFromBGEN(files.geno_handle, insize, outsize, snp_data_blocks, offsets);
 
   } else if((params.file_type == "bgen") && !params.streamBGEN) 
     readChunkFromBGENFileToG(indices, chrom, snpinfo, &params, Gblock.Gmat, Gblock.bgen, &in_filters, pheno_data.masked_indivs, pheno_data.phenotypes_raw, all_snps_info, sout);

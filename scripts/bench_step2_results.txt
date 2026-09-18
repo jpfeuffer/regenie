@@ -1,0 +1,49 @@
+# Genotype read path: std::ifstream -> bgen-limix stream_handle
+#
+# Recorded when the bgen genotype read path was migrated off std::ifstream so
+# that s3:// input works (ifstream cannot range-read a URL at all). The local
+# path is the common case, so it was the one that had to not regress.
+#
+# Reproduce: scripts/bench_step2.sh <binary> <label> [reps] [threads]
+
+machine       = Apple Silicon (arm64), macOS
+file          = benchmark_data_large/benchmark.bgen
+variants      = 1000000
+samples       = 500
+bsize         = 1000
+threads       = 4
+command       = --step 2 --ignore-pred --bt
+
+## End-to-end step 2, 5 reps each
+
+                          best (s)   median (s)   median vars/s
+std::ifstream (before)     112.530      113.045            8846
+stream_handle (after)      110.490      111.039            9006
+
+delta: 1.8% faster. No regression.
+
+## I/O micro-benchmark (scripts/bench_read_path.cc)
+#
+# The end-to-end run is compute-dominated (~110 ms per 1000-variant block, of
+# which the read is a small part), so it cannot resolve an I/O change on its
+# own. This replicates readChunkFromBGEN's exact access pattern -- seek to the
+# genotype offset, read two 4-byte sizes, read the compressed block, 1M times
+# -- against both backends on the same file and offsets.
+
+                          best (s)   median (s)         MB/s
+std::ifstream                1.375        1.399        120.2
+stream_handle                0.143        0.145       1156.9
+
+delta: 9.6x faster, reading byte-identical data (165,272,000 bytes both paths).
+fread/fseeko with its own buffering beats std::ifstream's per-call overhead
+badly at 1M small seek+read triples.
+
+The ~1.25 s saved on I/O accounts for the ~1.8% end-to-end improvement.
+
+## Correctness
+
+step 1, example_3chr.bgen      : LOCO predictions bit-identical (both phenotypes)
+step 2, benchmark.bgen         : association results bit-identical over all
+                                 1,000,000 variants x 2 phenotypes
+step 2, s3:// via local MinIO  : results bit-identical to the same data read
+                                 locally

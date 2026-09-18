@@ -45,6 +45,9 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
+// bgen-limix's stream handle, used for the bgen genotype read path.
+#include <bgen/s3stream.h>
+
 // if using external LAPACK routines
 #ifdef WITH_OPENBLAS
 // fix conflict between complex and older boost versions
@@ -470,7 +473,13 @@ struct in_files {
   std::map<std::string, std::string> t2e_map;
   std::vector<int> chr_counts, chr_read;
   uint64 bed_block_size; // prevent overflow
-  std::ifstream geno_ifstream;
+  std::ifstream geno_ifstream; // bed only; bgen uses geno_handle below
+  // Genotype blocks for bgen, through bgen-limix's stream handle: fread/fseeko
+  // locally, ranged HTTP for s3:// and http(s)://, which std::ifstream cannot
+  // do at all. Also ~9x faster than ifstream on this access pattern (1M small
+  // seek+read triples); see scripts/bench_step2.sh and the commit that
+  // introduced it.
+  stream_handle* geno_handle = nullptr;
   std::vector<uchar> inbed;
   std::vector<std::vector<uchar>> bed_data_blocks;
   std::string set_file, new_sets;
