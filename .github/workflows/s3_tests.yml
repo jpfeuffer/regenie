@@ -69,15 +69,21 @@ jobs:
             eigen
             cxxopts
             libdeflate
+            sqlite
 
       # bgen-limix >= 4.7 is needed for bgen_file_layout/compression/nbits and
       # BGEN::s3. conda-forge's bgen is still on the older 4.1.x line.
+      #
+      # -DBGEN_USE_SYSTEM_ATHR=OFF: athr (its progress-bar dependency) is not
+      # in the create-args above -- conda-forge's copy also hardcodes an Xcode
+      # SDK path on macOS -- so this has it fetch and build its own instead.
       - name: Build and install bgen-limix
         run: |
           git clone --depth 1 --branch "$BGEN_TAG" \
             https://github.com/jpfeuffer/bgen-limix.git "$RUNNER_TEMP/bgen"
           cmake -S "$RUNNER_TEMP/bgen" -B "$RUNNER_TEMP/bgen/build" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DBGEN_USE_SYSTEM_ATHR=OFF \
             -DCMAKE_INSTALL_PREFIX="$CONDA_PREFIX" \
             -DBGEN_BUILD_TESTS=OFF \
             -DBGEN_ENABLE_S3=ON
