@@ -38,7 +38,7 @@
 #include "BgenReader.hpp"
 #include "S3_Utils.hpp"
 
-namespace fs = boost::filesystem;
+namespace fs = std::filesystem;
 
 // Sequential variant iteration. Implemented in bgen-limix's src/variant.c and
 // exported, but not yet declared in its installed headers.
@@ -86,12 +86,12 @@ fs::path metafile_cache_dir(){
     if(v == nullptr || *v == '\0') continue;
     fs::path d(v);
     if(i == 1) d /= "regenie";            // XDG_CACHE_HOME is shared
-    boost::system::error_code ec;
+    std::error_code ec;
     fs::create_directories(d, ec);
     if(!ec && fs::is_directory(d)) return d;
   }
 
-  boost::system::error_code ec;
+  std::error_code ec;
   fs::path d = fs::temp_directory_path(ec) / "regenie";
   if(!ec){
     fs::create_directories(d, ec);
@@ -101,7 +101,7 @@ fs::path metafile_cache_dir(){
 }
 
 bool dir_is_writable(fs::path const& dir){
-  boost::system::error_code ec;
+  std::error_code ec;
   fs::path probe = dir / ".regenie_write_test";
   { std::ofstream f(probe.string()); if(!f.good()) return false; }
   fs::remove(probe, ec);
@@ -419,7 +419,7 @@ void BgenParser::open(std::string const& filename){
 
   // Only used to key the index cache; remote inputs simply get 0.
   if(!is_remote_path(filename)){
-    boost::system::error_code ec;
+    std::error_code ec;
     uintmax_t const sz = fs::file_size(filename, ec);
     if(!ec) file_size = static_cast<int64_t>(sz);
   }

@@ -70,11 +70,13 @@ if(NOT LBFGSpp_FOUND)
 endif()
 
 ######################################
-# Boost: math and exception are header-only, filesystem is compiled.
-# Until now filesystem resolved by accident out of the BGEN library's bundled
-# libboost.a (Boost 1.55, 2014); this links the real thing.
+# Boost: math and exception are header-only. Filesystem is no longer needed --
+# std::filesystem (C++17) replaced it -- which also drops the one compiled,
+# non-header-only Boost component this project used, and with it a class of
+# Windows link failures (DLL import-lib naming/availability for Boost's
+# compiled filesystem library) that came with it.
 
-find_package(Boost 1.71 REQUIRED COMPONENTS filesystem)
+find_package(Boost 1.71 REQUIRED)
 
 ######################################
 # Compression and threading

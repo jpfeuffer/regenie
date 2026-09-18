@@ -28,11 +28,10 @@
 #define BGEN_READER_H
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <unordered_map>
 #include <vector>
-
-#include <boost/filesystem.hpp>
 
 struct bgen_file;
 struct bgen_metafile;

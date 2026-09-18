@@ -149,7 +149,6 @@ target_link_libraries(regenie PRIVATE
   Eigen3::Eigen
   cxxopts::cxxopts
   LBFGSpp::LBFGSpp
-  Boost::filesystem
   Boost::headers
   ZLIB::ZLIB
   Threads::Threads)

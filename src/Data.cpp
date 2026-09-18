@@ -36,7 +36,7 @@
 #pragma GCC diagnostic ignored "-Wint-in-bool-context"
 #pragma GCC diagnostic ignored "-Wparentheses"
 #endif
-#include <boost/filesystem.hpp>
+#include <filesystem>
 #include <boost/exception/all.hpp>
 #if defined(__GNUC__)
 #pragma GCC diagnostic pop
@@ -66,7 +66,7 @@
 using namespace std;
 using namespace Eigen;
 using namespace boost;
-namespace fs = boost::filesystem;
+namespace fs = std::filesystem;
 
 
 using boost::math::normal;
@@ -1157,7 +1157,7 @@ std::string get_fullpath(std::string fname){
 
   try {
 
-    // convert to full path using boost filesystem library
+    // convert to full path using std::filesystem
     // this can generate errors due to LC_ALL locale being invalid
     fullpath = fs::absolute(fname);
     fout = fullpath.make_preferred().string();
@@ -1165,8 +1165,8 @@ std::string get_fullpath(std::string fname){
   } catch ( std::runtime_error& ex ) {
 
 #ifndef _WIN32
-    // to avoid boost::filesystem error; the LC_ALL locale bug this works
-    // around is glibc/Boost.Locale-specific and doesn't occur on Windows
+    // to avoid a std::filesystem error; the LC_ALL locale bug this works
+    // around is glibc-specific and doesn't occur on Windows
     setenv("LC_ALL", "C", 1);
 
     try {

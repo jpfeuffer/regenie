@@ -26,7 +26,7 @@
 #ifndef RFILES_H
 #define RFILES_H
 
-#include <boost/filesystem.hpp>
+#include <filesystem>
 
 # if defined(HAS_BOOST_IOSTREAM)
 #include <boost/iostreams/filtering_stream.hpp>

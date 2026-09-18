@@ -29,7 +29,7 @@
 #include "Files.hpp"
 #include "S3_Utils.hpp"
 
-namespace fs = boost::filesystem;
+namespace fs = std::filesystem;
 
 Files::Files(){
 }
