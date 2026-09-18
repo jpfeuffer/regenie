@@ -272,6 +272,20 @@ void BgenParser::load_metafile(){
 
   bool must_create = false;
   std::string const mpath = resolve_metafile_path(must_create);
+  bool const explicit_path = !explicit_metafile_path.empty();
+
+  // bgen-limix can only ever create a metafile with fopen(), so a remote
+  // target is rejected here with a clear reason instead of failing inside
+  // bgen_metafile_create() with a bare "could not create file". Reading one
+  // that already exists remotely is fine -- bgen_metafile_open() streams --
+  // so this only fires when the metafile still needs to be built.
+  if(must_create && is_remote_path(mpath))
+    throw "--bgen-metafile " + mpath + " is remote, but building a metafile\n"
+      "       only ever writes through fopen(), so it cannot be created\n"
+      "       there. Point --bgen-metafile at a local path, omit it to use\n"
+      "       the default cache location, or pre-build the metafile "
+      "in-region\n"
+      "       and pass that same remote path so it is read instead.";
 
   if(!must_create) mfile = bgen_metafile_open(mpath.c_str());
 
@@ -279,6 +293,16 @@ void BgenParser::load_metafile(){
 
   // No metafile, or one written by an incompatible version.
   if(!is_remote_path(path)){
+
+    // An explicit --bgen-metafile is a request to build it there specifically,
+    // so a failure to do so is reported rather than silently worked around.
+    if(explicit_path){
+      mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
+      if(mfile == nullptr)
+        throw "cannot create bgen metafile at " + mpath + " (from --bgen-metafile)";
+      read_metafile(mpath);
+      return;
+    }
 
     // A metafile is preferred over .bgi whenever both exist, which is why
     // this is only reached once no metafile was found. bgenix's own default
