@@ -32,6 +32,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <boost/filesystem.hpp>
+
 struct bgen_file;
 struct bgen_metafile;
 
@@ -102,10 +104,16 @@ class BgenParser {
     void load_index();
     void build_offset_map();
 
+    // Where to read or build the index. Never returns a path beside a remote
+    // input, and falls back to a cache directory when the input's directory is
+    // not writable.
+    std::string resolve_index_path(bool& must_create) const;
+
     bgen_file* bfile = nullptr;
     bgen_metafile* mfile = nullptr;
 
     std::string path;
+    int64_t file_size = 0;
     uint32_t layout = 0, compression = 0, nbits = 0;
     uint32_t n_samples = 0, n_variants = 0;
     bool have_sample_ids = false;

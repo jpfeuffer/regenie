@@ -25,32 +25,112 @@
 */
 
 #include <fstream>
+#include <iostream>
 #include <sstream>
 
 #include "bgen/bgen.h"
 
 #include "BgenReader.hpp"
+#include "S3_Utils.hpp"
+
+namespace fs = boost::filesystem;
 
 std::string bgen_metafile_path(std::string const& bgen_file){
   return bgen_file + ".metafile";
 }
+
+namespace {
+
+bool is_readable(std::string const& p){
+  std::ifstream probe(p, std::ios::in | std::ios::binary);
+  return probe.good();
+}
+
+// A stable per-input key, so a cached index is reused across runs rather than
+// rebuilt. Size is included so an input replaced in place is not matched.
+std::string cache_key(std::string const& path, int64_t size){
+  std::hash<std::string> h;
+  std::ostringstream o;
+  o << std::hex << h(path) << "_" << size;
+  return o.str();
+}
+
+// Directory to build an index in when it cannot live beside the input.
+fs::path index_cache_dir(){
+
+  char const* env[] = {"REGENIE_CACHE_DIR", "XDG_CACHE_HOME", "TMPDIR"};
+  for(size_t i = 0; i < 3; i++){
+    char const* v = getenv(env[i]);
+    if(v == nullptr || *v == '\0') continue;
+    fs::path d(v);
+    if(i == 1) d /= "regenie";            // XDG_CACHE_HOME is shared
+    boost::system::error_code ec;
+    fs::create_directories(d, ec);
+    if(!ec && fs::is_directory(d)) return d;
+  }
+
+  boost::system::error_code ec;
+  fs::path d = fs::temp_directory_path(ec) / "regenie";
+  if(!ec){
+    fs::create_directories(d, ec);
+    if(!ec) return d;
+  }
+  return fs::current_path();
+}
+
+bool dir_is_writable(fs::path const& dir){
+  boost::system::error_code ec;
+  fs::path probe = dir / ".regenie_write_test";
+  { std::ofstream f(probe.string()); if(!f.good()) return false; }
+  fs::remove(probe, ec);
+  return true;
+}
+
+} // anonymous namespace
 
 BgenParser::~BgenParser(){
   if(mfile != nullptr) bgen_metafile_close(mfile);
   if(bfile != nullptr) bgen_file_close(bfile);
 }
 
-void BgenParser::load_index(){
+// Resolution order: an index that already exists beside the input, then one in
+// the cache, then build one. Building never writes beside a remote input, and
+// falls back to the cache when the input's directory is read-only.
+std::string BgenParser::resolve_index_path(bool& must_create) const {
 
-  std::string const mpath = bgen_metafile_path(path);
+  std::string const beside = bgen_metafile_path(path);
+  bool const remote = is_remote_path(path);
 
-  std::ifstream probe(mpath, std::ios::in | std::ios::binary);
-  if(probe.good()){
-    probe.close();
-    mfile = bgen_metafile_open(mpath.c_str());
+  if(!remote && is_readable(beside)){ must_create = false; return beside; }
+
+  fs::path const cached =
+    index_cache_dir() / (cache_key(path, file_size) + ".metafile");
+  if(is_readable(cached.string())){ must_create = false; return cached.string(); }
+
+  must_create = true;
+
+  if(!remote){
+    fs::path dir = fs::path(beside).parent_path();
+    if(dir.empty()) dir = fs::current_path();
+    if(dir_is_writable(dir)) return beside;
   }
 
-  if(mfile == nullptr){ // absent or unreadable (e.g. written by an older version)
+  return cached.string();
+}
+
+void BgenParser::load_index(){
+
+  bool must_create = false;
+  std::string const mpath = resolve_index_path(must_create);
+
+  if(!must_create) mfile = bgen_metafile_open(mpath.c_str());
+
+  if(mfile == nullptr){ // absent, or written by an incompatible version
+    if(is_remote_path(path))
+      std::cerr << "WARNING: no index found for " << path
+                << "; building one requires reading the whole file over the "
+                   "network. Generate " << bgen_metafile_path(path)
+                << " alongside the data to avoid this.\n";
     mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
     if(mfile == nullptr)
       throw "cannot create bgen index file : " + mpath;
@@ -66,7 +146,7 @@ void BgenParser::load_index(){
 
     bgen_partition const* part = bgen_metafile_read_partition(mfile, ipart);
     if(part == nullptr)
-      throw "cannot read partition " + std::to_string(ipart) + " of " + bgen_metafile_path(path);
+      throw "cannot read partition " + std::to_string(ipart) + " of " + mpath;
 
     uint32_t const nvars = bgen_partition_nvariants(part);
     for(uint32_t iv = 0; iv < nvars; iv++, ivar++){
@@ -91,6 +171,13 @@ void BgenParser::load_index(){
 void BgenParser::open(std::string const& filename){
 
   path = filename;
+
+  // Only used to key the index cache; remote inputs simply get 0.
+  if(!is_remote_path(filename)){
+    boost::system::error_code ec;
+    uintmax_t const sz = fs::file_size(filename, ec);
+    if(!ec) file_size = static_cast<int64_t>(sz);
+  }
 
   bfile = bgen_file_open(filename.c_str());
   if(bfile == nullptr) throw "cannot open bgen file : " + filename;
