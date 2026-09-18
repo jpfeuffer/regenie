@@ -134,16 +134,16 @@ void BgenParser::load_index(){
   if(mfile == nullptr){ // absent, or written by an incompatible version
     if(is_remote_path(path) && !allow_remote_index_build)
       throw "no index found for remote file : " + path + "\n"
-        "       Building one walks every variant in the file. Genotype blocks are\n"
-        "       skipped rather than fetched, but it still costs one request per\n"
-        "       variant, so it is slow over the network and is not done by\n"
-        "       default. Either generate\n"
+        "       Building one walks every variant. The scan seeks past genotype\n"
+        "       blocks, but the reader fetches in 8MB chunks that tile the file,\n"
+        "       so those bytes are transferred anyway and the walk costs roughly\n"
+        "       one full download. Either generate\n"
         "       " + bgen_metafile_path(path) + " alongside the data, or pass\n"
         "       --allow-remote-index-build to build it now.";
 
     if(is_remote_path(path))
       std::cerr << "WARNING: building an index for " << path
-                << " walks every variant over the network; this may take a while.\n";
+                << " transfers roughly the whole object; this may take a while.\n";
 
     mfile = bgen_metafile_create(bfile, mpath.c_str(), 1, 0);
     if(mfile == nullptr)
